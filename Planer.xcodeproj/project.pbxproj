@@ -252,6 +252,8 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Planer;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Planer benötigt das Mikrofon, um Ihre Diktate aufzunehmen. Die Aufnahme wird auf diesem Gerät ausgewertet und nicht an einen Server übertragen.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Planer wandelt Ihre gesprochenen Sätze auf diesem Gerät in Text um. Die Erkennung läuft ohne Netz auf dem Gerät; ohne deutsche On-Device-Erkennung bietet die App kein Diktat an.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -280,6 +282,8 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Planer;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Planer benötigt das Mikrofon, um Ihre Diktate aufzunehmen. Die Aufnahme wird auf diesem Gerät ausgewertet und nicht an einen Server übertragen.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Planer wandelt Ihre gesprochenen Sätze auf diesem Gerät in Text um. Die Erkennung läuft ohne Netz auf dem Gerät; ohne deutsche On-Device-Erkennung bietet die App kein Diktat an.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
