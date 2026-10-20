@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "hermes_tasks response (§2.2)",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["id", "title", "status", "priority", "source", "version"],
+    "properties": {
+      "id":            { "type": "string" },
+      "title":         { "type": "string", "minLength": 1, "maxLength": 200 },
+      "description":   { "type": ["string", "null"] },
+      "status":        { "type": "string", "enum": ["open", "done"] },
+      "priority":      { "type": "string", "enum": ["low", "normal", "high"] },
+      "source":        { "type": "string", "enum": ["hermes", "local"] },
+      "due_at":        { "type": ["string", "null"], "format": "date" },
+      "completed_at":  { "type": ["string", "null"], "format": "date-time" },
+      "version":       { "type": "integer" }
+    },
+    "additionalProperties": true
+  }
+}
