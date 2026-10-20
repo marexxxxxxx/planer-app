@@ -10,8 +10,9 @@ import SwiftUI
 
 /// Root-View von Tab 2.
 ///
-/// Zweck: die To-Do-Liste mit den drei Statusfiltern aus §2.2, Abhaken,
-/// Swipe-Löschen, Anlegen und sichtbarem Offline-/Konflikt-Zustand.
+/// Zweck: die To-Do-Liste mit den drei Segmenten `Alle|Heute|Erledigt`
+/// (spec-ios §1/I4), Abhaken, Swipe-Löschen, Anlegen und sichtbarem
+/// Offline-/Konflikt-Zustand.
 /// Grenze: keine eigene Netzwerk- oder Cache-Logik; die liegt in
 /// `TodosViewModel` und `TodoRepository`.
 struct TodosView: View {
@@ -20,12 +21,21 @@ struct TodosView: View {
     @StateObject private var viewModel = TodosViewModel()
     @State private var isPresentingEditor = false
 
+    /// Bindet den Konflikt-Alert an `viewModel.conflict`.
+    ///
+    /// Der Setter räumt den Zustand auf: SwiftUI setzt `isPresented` beim
+    /// Antippen einer Aktion auf `false`, bevor die Aktion läuft. Die Aktionen
+    /// bekommen den Konflikt deshalb als Parameter. Ohne dieses Aufräumen
+    /// bliebe `conflict` gesetzt und derselbe Alert könnte nach einer
+    /// fehlgeschlagenen Auflösung erneut erscheinen.
     private var conflictBinding: Binding<Bool> {
         Binding(
             get: { viewModel.conflict != nil },
-            // Kein Aufräumen im Setter: SwiftUI setzt `isPresented` vor der
-            // Button-Action auf false; der Dialog braucht den Konflikt noch.
-            set: { _ in }
+            set: { isPresented in
+                if !isPresented {
+                    viewModel.dismissConflict()
+                }
+            }
         )
     }
 
@@ -67,10 +77,10 @@ struct TodosView: View {
                 presenting: viewModel.conflict
             ) { conflict in
                 Button("Server behalten") {
-                    Task { await viewModel.resolveConflictKeepingServer() }
+                    Task { await viewModel.resolveConflictKeepingServer(conflict) }
                 }
                 Button("Lokal behalten") {
-                    Task { await viewModel.resolveConflictKeepingLocal() }
+                    Task { await viewModel.resolveConflictKeepingLocal(conflict) }
                 }
                 Button("Später", role: .cancel) {
                     viewModel.dismissConflict()
@@ -241,8 +251,8 @@ struct TodosView: View {
         switch viewModel.filter {
         case .all:
             return "Keine To-Dos"
-        case .open:
-            return "Nichts offen"
+        case .today:
+            return "Heute nichts fällig"
         case .done:
             return "Nichts erledigt"
         }
@@ -252,8 +262,9 @@ struct TodosView: View {
         switch viewModel.filter {
         case .all:
             return "Neue Einträge legst du über das Plus an."
-        case .open:
-            return "Alle Einträge sind erledigt."
+        case .today:
+            return "Für heute ist kein offenes To-Do fällig. "
+                + "Überfällige und undatierte Einträge stehen unter „Alle“."
         case .done:
             return "Erledigte Einträge erscheinen hier."
         }

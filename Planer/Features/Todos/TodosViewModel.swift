@@ -85,7 +85,9 @@ final class TodosViewModel: ObservableObject {
         }
     }
 
-    /// Wechselt den Statusfilter aus §2.2 (`all|open|done`) und lädt neu.
+    /// Wechselt das Segment `Alle|Heute|Erledigt` (spec-ios §1/I4) und lädt
+    /// neu. `Heute` wird serverseitig als `open` geladen und clientseitig über
+    /// `due_at` eingeengt.
     @MainActor
     func setFilter(_ newValue: TodoStatusFilter) async {
         guard newValue != filter else { return }
@@ -108,7 +110,7 @@ final class TodosViewModel: ObservableObject {
 
         do {
             let dto = try await repository.create(draft)
-            tasks = sorted(replacing(dto))
+            tasks = replacingVisible(dto)
             banner = nil
             isUsingCache = false
             updatePendingCount()
@@ -116,7 +118,7 @@ final class TodosViewModel: ObservableObject {
         } catch let error as APIError where TodoRepository.isConnectivityFailure(error) {
             do {
                 let dto = try repository.stageCreate(draft)
-                tasks = sorted(replacing(dto))
+                tasks = replacingVisible(dto)
                 isUsingCache = true
                 updatePendingCount()
                 banner = "Offline gespeichert — das To-Do wird beim nächsten Abgleich übertragen."
@@ -144,7 +146,7 @@ final class TodosViewModel: ObservableObject {
                 status: nextStatus,
                 baseVersion: task.version
             )
-            tasks = sorted(replacing(dto))
+            tasks = replacingVisible(dto)
             banner = nil
             isUsingCache = false
             updatePendingCount()
@@ -190,37 +192,53 @@ final class TodosViewModel: ObservableObject {
 
     // MARK: - Konflikte
 
+    /// „Server behalten“. Der Konflikt kommt als Parameter, weil die View den
+    /// Zustand beim Schließen des Alerts bereits zurückgesetzt hat.
+    ///
+    /// Bei einem Fehler bleibt der Alert geschlossen und der Grund steht als
+    /// Banner in der Liste — der Dialog öffnet sich nicht von selbst erneut.
     @MainActor
-    func resolveConflictKeepingServer() async {
-        guard let repository, let conflict else { return }
+    func resolveConflictKeepingServer(_ conflict: TodoConflict) async {
+        guard let repository else {
+            banner = "Der Cache ist noch nicht bereit."
+            return
+        }
+        self.conflict = nil
         do {
             try await repository.discardLocalChanges(id: conflict.id)
-            self.conflict = nil
             await reloadFromCache()
             updatePendingCount()
             banner = "Serverstand übernommen."
         } catch {
-            banner = message(for: error)
+            banner = "Konflikt nicht aufgelöst — \(message(for: error)). "
+                + "Beim nächsten Abgleich wird es erneut versucht."
         }
     }
 
+    /// „Lokal behalten“. Meldet der Server erneut `409`, hat sich sein Stand
+    /// während der Entscheidung geändert; dann wird bewusst ein neuer
+    /// Konfliktdialog aufgebaut. Jeder andere Fehler endet als Banner, nicht
+    /// als wiederkehrender Alert.
     @MainActor
-    func resolveConflictKeepingLocal() async {
-        guard let repository, let conflict else { return }
+    func resolveConflictKeepingLocal(_ conflict: TodoConflict) async {
+        guard let repository else {
+            banner = "Der Cache ist noch nicht bereit."
+            return
+        }
+        self.conflict = nil
         do {
             let dto = try await repository.forceLocal(id: conflict.id)
-            tasks = sorted(replacing(dto))
-            self.conflict = nil
+            tasks = replacingVisible(dto)
             banner = "Lokaler Stand übernommen."
             updatePendingCount()
         } catch let error as APIError {
             if case .conflict = error {
                 await presentConflict(id: conflict.id)
             } else {
-                banner = message(for: error)
+                banner = "Konflikt nicht aufgelöst — \(message(for: error))."
             }
         } catch {
-            banner = message(for: error)
+            banner = "Konflikt nicht aufgelöst — \(message(for: error))."
         }
     }
 
@@ -324,10 +342,20 @@ final class TodosViewModel: ObservableObject {
         pendingCount = (try? repository.pendingCount()) ?? pendingCount
     }
 
-    private func replacing(_ dto: TodoDTO) -> [TodoDTO] {
+    /// Ersetzt einen Eintrag und entfernt ihn, wenn er nicht mehr in das
+    /// aktuelle Segment gehört — etwa ein To-Do, das unter „Heute“ abgehakt
+    /// wird, oder ein neu angelegtes To-Do im Segment „Erledigt“.
+    private func replacingVisible(_ dto: TodoDTO) -> [TodoDTO] {
         var next = tasks.filter { $0.id != dto.id }
-        next.append(dto)
-        return next
+        let visible = filter.includes(
+            itemStatus: dto.status,
+            dueAt: dto.dueAt,
+            isPendingDelete: false
+        )
+        if visible {
+            next.append(dto)
+        }
+        return sorted(next)
     }
 
     private func sorted(_ values: [TodoDTO]) -> [TodoDTO] {

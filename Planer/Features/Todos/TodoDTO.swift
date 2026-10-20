@@ -84,10 +84,17 @@ enum TodoStatus: String {
     case done
 }
 
-/// Die drei Statusfilter aus `GET /api/tasks?status=…` (spec-ios §2.2).
+/// Die drei Segmente des To-Dos-Tabs: `Alle|Heute|Erledigt`
+/// (spec-ios §1/I4).
+///
+/// `Heute` ist kein Server-Filter: `GET /api/tasks` kennt nur
+/// `all|open|done` (§2.2). Der Server wird deshalb mit `status=open`
+/// abgefragt; die Tagesauswahl passiert clientseitig über `due_at`.
+/// Grenze: „Heute“ zeigt offene Einträge mit `due_at` = heutiger Kalendertag.
+/// Überfällige und undatierte Einträge bleiben unter „Alle“ sichtbar.
 enum TodoStatusFilter: String, CaseIterable, Identifiable {
     case all
-    case open
+    case today
     case done
 
     var id: String { rawValue }
@@ -96,16 +103,52 @@ enum TodoStatusFilter: String, CaseIterable, Identifiable {
         switch self {
         case .all:
             return "Alle"
-        case .open:
-            return "Offen"
+        case .today:
+            return "Heute"
         case .done:
             return "Erledigt"
         }
     }
 
-    /// `nil` bei `all`; sonst der Server-Status für den Cache-Filter.
-    var cachedStatus: String? {
-        self == .all ? nil : rawValue
+    /// Statusparameter für `GET /api/tasks?status=…` (§2.2).
+    ///
+    /// `today` wird als `open` geladen und danach über `due_at` eingeengt.
+    /// Ein nicht unterstützter Wert darf nie an den Server gehen.
+    var serverStatus: String {
+        switch self {
+        case .all:
+            return "all"
+        case .today:
+            return TodoStatus.open.rawValue
+        case .done:
+            return TodoStatus.done.rawValue
+        }
+    }
+
+    /// `true`, wenn ein Cache-Eintrag in dieses Segment gehört.
+    ///
+    /// Die Tagesauswahl liegt bewusst hier und nicht im Repository, damit
+    /// „Heute“ an genau einer Stelle definiert ist: offen **und** `due_at`
+    /// auf dem heutigen lokalen Kalendertag.
+    func includes(
+        itemStatus: String,
+        dueAt: Date?,
+        isPendingDelete: Bool,
+        now: Date = Date()
+    ) -> Bool {
+        guard !isPendingDelete else { return false }
+
+        switch self {
+        case .all:
+            return true
+        case .today:
+            guard itemStatus == TodoStatus.open.rawValue, let dueAt else {
+                return false
+            }
+            return TodoFormatting.isDueToday(dueAt, now: now)
+        case .done:
+            return itemStatus == TodoStatus.done.rawValue
+        }
     }
 }
 
@@ -202,6 +245,18 @@ enum TodoFormatting {
         var utcCalendar = Calendar(identifier: .gregorian)
         utcCalendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
         return utcCalendar.date(from: components) ?? date
+    }
+
+    /// `true`, wenn `date` auf denselben lokalen Kalendertag fällt wie `now`.
+    ///
+    /// `due_at` liegt als UTC-Mitternacht des gewählten Tags vor. Der Vergleich
+    /// bildet deshalb zuerst den lokalen Tag von `now` über `normalizedDay` auf
+    /// UTC-Mitternacht ab — sonst würde ein Eintrag am Abend je nach
+    /// Zeitzonenversatz einen Tag daneben liegen.
+    static func isDueToday(_ date: Date, now: Date = Date()) -> Bool {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        return utcCalendar.isDate(date, inSameDayAs: normalizedDay(now))
     }
 }
 

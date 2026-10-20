@@ -40,6 +40,9 @@ struct TodoRepository {
 
     /// Lädt die gefilterte Serverliste und spiegelt sie in den Cache.
     ///
+    /// `today` fragt serverseitig `status=open` ab (§2.2 kennt kein `today`)
+    /// und liest die Projektion anschließend über `due_at` auf den heutigen
+    /// Kalendertag ein.
     /// Rückgabe ist die Cache-Projektion, damit lokal vorgemerkte Änderungen
     /// (dirty/unsynced) sichtbar bleiben, bis sie übertragen sind.
     func fetch(
@@ -54,7 +57,9 @@ struct TodoRepository {
         // Status aufräumen; ein gekürzter Abruf gar nichts.
         let prune: PruneScope
         if tasks.count < effectiveLimit {
-            prune = status == .all ? .all : .status(status.rawValue)
+            // `today` lädt serverseitig `open`; der Prune-Bereich ist deshalb
+            // der Server-Status, nicht der Segmentname.
+            prune = status == .all ? .all : .status(status.serverStatus)
         } else {
             prune = .none
         }
@@ -70,10 +75,12 @@ struct TodoRepository {
         let effectiveLimit = Self.clamped(limit)
         let items = try context.fetch(FetchDescriptor<TodoItem>())
         let visible = items
-            .filter { item in
-                guard !item.pendingDelete else { return false }
-                guard let cachedStatus = status.cachedStatus else { return true }
-                return item.status == cachedStatus
+            .filter {
+                status.includes(
+                    itemStatus: $0.status,
+                    dueAt: $0.dueAt,
+                    isPendingDelete: $0.pendingDelete
+                )
             }
             .sorted { $0.updatedAt > $1.updatedAt }
             .prefix(effectiveLimit)
@@ -348,7 +355,7 @@ struct TodoRepository {
         limit: Int
     ) async throws -> [TodoDTO] {
         let query = [
-            URLQueryItem(name: "status", value: status.rawValue),
+            URLQueryItem(name: "status", value: status.serverStatus),
             URLQueryItem(name: "limit", value: String(limit))
         ]
         return try await network.send(
