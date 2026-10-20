@@ -10,8 +10,9 @@ import Foundation
 
 /// Lädt Bestand/Einkaufsliste über den Cache und führt Hinzufügen aus.
 ///
-/// Zweck: Cache-Regel aus §3.2 (frisch → Cache, sonst Server, Server gewinnt)
-/// und die Autovervollständigung aus dem Produktkatalog.
+/// Zweck: Cache-Regel aus §3.2 (frisch → Cache, sonst Server, Server gewinnt),
+/// die Autovervollständigung aus dem Produktkatalog und das Übertragen der
+/// app-weit geteilten Pending-Queue aus I5/I6.
 /// Grenze: keine Persistenz der Pending-Queue über einen App-Neustart hinaus;
 /// das bräuchte ein Feld in `GroceryItem` (I2) oder eine zweite Ablage.
 @MainActor
@@ -45,10 +46,14 @@ final class GrocyViewModel: ObservableObject {
     }
 
     /// Lädt die Ansicht: frischer Cache bleibt stehen, sonst Server (§3.2).
+    ///
+    /// Die Queue wird bei jedem Öffnen neu gelesen: sie wird app-weit geteilt
+    /// und kann seit dem Bau des ViewModels im Rezepte-Tab gefüllt worden sein.
     func load() async {
         isLoading = true
         defer { isLoading = false }
 
+        pendingCount = repository.pendingAdds.count
         if repository.isCacheFresh(kind: .stock) && repository.isCacheFresh(kind: .shopping) {
             reloadFromCache()
         } else {

@@ -88,6 +88,8 @@ extension GrocyRow {
 ///
 /// Zweck: eine Stelle für die vier Endpunkte aus §2.3, die Cache-Regel aus §3.2
 /// (TTL 600 s, Server gewinnt) und die Pending-Queue für Offline-Hinzufügen.
+/// Die Instanz wird app-weit über `GrocyRepositoryProvider` geteilt, damit
+/// Rezepte- und Einkaufs-Tab auf derselben Queue arbeiten.
 /// Grenze: keine UI-Zustände; die Pending-Queue ist bewusst flüchtig, weil die
 /// Cache-Entities aus I2 kein Pending-Feld haben und `Planer/Cache/**` für I5
 /// gesperrt ist (siehe Abschlussbericht, OFFEN).
@@ -351,6 +353,31 @@ final class GrocyRepository {
     private func cacheByServerKey(kind: GrocyCacheKind) throws -> [String: GroceryItem] {
         let items = try cachedItems(kind: kind)
         return Dictionary(items.map { ($0.serverKey, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+}
+
+/// Einzige Bezugsstelle der app-weit geteilten `GrocyRepository`-Instanz.
+///
+/// Zweck: Rezepte- und Einkaufs-Tab müssen dieselbe Pending-Queue sehen, damit
+/// eine im Rezepte-Tab offline vorgemerkte Zutat beim nächsten Öffnen des
+/// Einkaufs-Tabs übertragen wird (§3.2). Ein Repository je Tab hätte je eine
+/// eigene Queue; die Zutaten gingen verloren.
+/// Grenze: hält einen Eintrag je `ModelContext` und gibt ihn nicht aktiv frei;
+/// im App-Betrieb gibt es genau einen Kontext, der so lange lebt wie die App.
+@MainActor
+enum GrocyRepositoryProvider {
+
+    private static var instances: [ObjectIdentifier: GrocyRepository] = [:]
+
+    /// Liefert die geteilte Instanz für den übergebenen SwiftData-Kontext.
+    static func shared(context: ModelContext) -> GrocyRepository {
+        let key = ObjectIdentifier(context)
+        if let existing = instances[key] {
+            return existing
+        }
+        let created = GrocyRepository(context: context)
+        instances[key] = created
+        return created
     }
 }
 

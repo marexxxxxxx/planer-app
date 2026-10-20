@@ -45,7 +45,7 @@ struct MealieView: View {
     private func prepare() async {
         let model = self.model ?? MealieViewModel(
             repository: MealieRepository(context: modelContext),
-            grocy: GrocyRepository(context: modelContext)
+            grocy: GrocyRepositoryProvider.shared(context: modelContext)
         )
         self.model = model
         await model.load()

@@ -43,7 +43,7 @@ struct GrocyView: View {
     @MainActor
     private func prepare() async {
         let model = self.model ?? GrocyViewModel(
-            repository: GrocyRepository(context: modelContext)
+            repository: GrocyRepositoryProvider.shared(context: modelContext)
         )
         self.model = model
         await model.load()

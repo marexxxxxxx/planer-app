@@ -31,7 +31,7 @@ struct MealieTransferResult: Equatable {
             parts.append("\(added) Zutat(en) aus „\(recipeName)“ auf die Grocy-Einkaufsliste gesetzt")
         }
         if queued > 0 {
-            parts.append("\(queued) offline vorgemerkt — Grocy überträgt beim nächsten Öffnen des Einkaufs-Tabs")
+            parts.append("\(queued) offline vorgemerkt — der Einkaufs-Tab versucht die Übertragung beim nächsten Öffnen")
         }
         if failed > 0 {
             parts.append("\(failed) Zutat(en) konnte Grocy nicht annehmen")
@@ -51,7 +51,8 @@ struct MealieTransferResult: Equatable {
 /// Zweck: Cache-Regel aus §3.3 (Server zuerst, bei Fehler letzter Cache) und
 /// der Grocy-Schreibpfad aus AD-8/§2.3.
 /// Grenze: keine Schreibzugriffe auf Mealie; die Grocy-Pending-Queue (I5) ist
-/// flüchtig und wird beim Öffnen des Einkaufs-Tabs übertragen.
+/// flüchtig, aber app-weit geteilt und wird beim Öffnen des Einkaufs-Tabs
+/// übertragen.
 @MainActor
 final class MealieViewModel: ObservableObject {
 
