@@ -25,7 +25,8 @@ open Planer.xcodeproj
 - Debuggen/Testen im Simulator ist nur auf einem Mac möglich.
 - Das App-Icon liegt als einzelnes 1024×1024-PNG in
   `Planer/App/Assets.xcassets/AppIcon.appiconset/`; Xcode skaliert es für die
-  übrigen Größen und übernimmt die Maskierung.
+  übrigen Größen und übernimmt die Maskierung. Das eingecheckte Bild ist ein
+  generierter Platzhalter, nicht das endgültige Icon (siehe „Offene Punkte").
 
 ## Struktur
 
@@ -104,6 +105,16 @@ statisch ohne Swift-Toolchain und enden mit `Ergebnis: OK`.
 
 Kompilierung, Rendering und Light/Dark-Darstellung sind **nur auf Mac prüfbar**
 und nicht Teil des binären Kriteriums.
+
+## Offene Punkte
+
+- **App-Icon-Bild:** In `Planer/App/Assets.xcassets/AppIcon.appiconset/` liegt
+  mit `AppIcon-1024.png` nur ein generiertes Platzhalterbild (1024×1024, RGB
+  ohne Alphakanal). Das endgültige App-Icon-Bild fehlt und muss vom
+  Auftraggeber gesetzt werden. Der Eintrag in `Contents.json` bleibt dabei
+  unverändert; das Bild ersetzt nur die vorhandene Datei.
+- **Build und Darstellung:** Kompilierung, Simulator-/Gerätetest, Rendering und
+  Light/Dark-Darstellung sind nur auf einem Mac prüfbar.
 
 ## Konventionen
 
