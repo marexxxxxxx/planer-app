@@ -18,6 +18,7 @@ import SwiftUI
 struct ChatView: View {
 
     @StateObject private var viewModel = ChatViewModel()
+    @EnvironmentObject private var voice: VoiceCoordinator
     @FocusState private var isInputFocused: Bool
 
     /// Anker für das automatische Scrollen ans Ende.
@@ -32,6 +33,7 @@ struct ChatView: View {
                 }
                 transcript
                 Divider()
+                VoiceControlBar()
                 composer
             }
             .background(DesignTokens.Palette.groupedBackground)
@@ -43,6 +45,12 @@ struct ChatView: View {
                 }
             }
             .task {
+                // N1: `@StateObject` erlaubt keinen Environment-Zugriff im
+                // Initializer — die Verdrahtung passiert hier, vor `connect()`.
+                viewModel.voice = voice
+                voice.onTranscript = { [weak viewModel] text in
+                    viewModel?.appendDictation(text)
+                }
                 await viewModel.connect()
             }
             .onDisappear {
@@ -169,7 +177,17 @@ struct ChatView: View {
         case .user:
             MessageBubbleView(role: .user, text: entry.text)
         case .agent:
-            MessageBubbleView(role: .agent, text: entry.text)
+            VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
+                MessageBubbleView(role: .agent, text: entry.text)
+
+                // §7: jede Antwort trägt ihre Herkunft — kein stiller Wechsel.
+                if let engine = entry.engine {
+                    Text(engine.title)
+                        .font(DesignTokens.Typography.footnote)
+                        .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                        .accessibilityLabel(Text("Antwort von \(engine.title)"))
+                }
+            }
         case .tool:
             VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
                 ToolCallBadge(
@@ -269,4 +287,5 @@ struct ChatView: View {
 
 #Preview("ChatView") {
     ChatView()
+        .environmentObject(VoiceCoordinator())
 }

@@ -57,6 +57,10 @@ struct TodosView: View {
             .background(DesignTokens.Palette.groupedBackground)
             .navigationTitle("To-Dos")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    // §6: der Knopf liest den sichtbaren Listentext vor.
+                    ReadAloudButton(text: { visibleListText })
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         isPresentingEditor = true
@@ -160,6 +164,23 @@ struct TodosView: View {
             return "\(viewModel.pendingCount) Änderung(en) warten auf Übertragung"
         }
         return "Offline-Stand aus dem Cache"
+    }
+
+    // MARK: - Vorlesen
+
+    /// Der sichtbare Listentext für `ReadAloudButton` (§6).
+    ///
+    /// Was nicht in der Liste steht, wird nicht vorgelesen: Grundlage ist
+    /// `viewModel.tasks` im aktuellen Filter. Jede Zeile ist ein eigener Satz,
+    /// damit die Ausgabe nicht an einem 240-Zeichen-Schnitt hängt.
+    private var visibleListText: String {
+        let tasks = viewModel.tasks
+        guard !tasks.isEmpty else { return "" }
+
+        let open = tasks.filter { !$0.isDone }.count
+        var lines = ["\(tasks.count) To-Dos (\(viewModel.filter.title)), \(open) offen:"]
+        lines.append(contentsOf: tasks.map { "\($0.title), \($0.subtitle)" })
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Liste
@@ -274,4 +295,5 @@ struct TodosView: View {
 #Preview("TodosView") {
     TodosView()
         .modelContainer(for: TodoItem.self, inMemory: true)
+        .environmentObject(VoiceCoordinator())
 }

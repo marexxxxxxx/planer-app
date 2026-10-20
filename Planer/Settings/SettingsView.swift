@@ -22,6 +22,7 @@ struct SettingsView: View {
                 ServiceSettingsSection(service: .grocy)
                 ServiceSettingsSection(service: .mealie)
                 AppLockSection()
+                VoiceSettingsSection()
             }
             .navigationTitle("Einstellungen")
         }

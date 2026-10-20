@@ -49,6 +49,8 @@ final class ChatViewModel: ObservableObject {
         var toolStatus: ToolCallBadge.Status?
         /// Nur bei `kind == .tool`: der Aufruf wartet auf die Action-Chips.
         var awaitsConfirmation: Bool
+        /// Nur bei `kind == .agent`: woher die Antwort stammt (§7, N7).
+        var engine: ChatEngine?
 
         init(
             id: UUID = UUID(),
@@ -56,7 +58,8 @@ final class ChatViewModel: ObservableObject {
             text: String,
             toolName: String? = nil,
             toolStatus: ToolCallBadge.Status? = nil,
-            awaitsConfirmation: Bool = false
+            awaitsConfirmation: Bool = false,
+            engine: ChatEngine? = nil
         ) {
             self.id = id
             self.kind = kind
@@ -64,6 +67,7 @@ final class ChatViewModel: ObservableObject {
             self.toolName = toolName
             self.toolStatus = toolStatus
             self.awaitsConfirmation = awaitsConfirmation
+            self.engine = engine
         }
     }
 
@@ -91,6 +95,14 @@ final class ChatViewModel: ObservableObject {
     /// (Freigabe, Ablehnung, Abbruch, Trennen, Verlauf löschen) — ein Chip kann
     /// sich damit nie auf einen anderen als den angezeigten Aufruf beziehen.
     @Published private(set) var pendingToolCall: ToolCallConfirmation?
+
+    /// Die Sprachschicht (V3, §6). `ChatView` setzt sie nach dem Erzeugen des
+    /// Modells — ein `@StateObject` erlaubt keinen Environment-Zugriff im
+    /// Initializer (N1).
+    ///
+    /// `nil` heißt: kein Vorlesen und kein Diktat — der Chat funktioniert
+    /// unverändert.
+    var voice: (any VoiceAssistant)?
 
     private let mcpClient: MCPClient
     private let provider: ChatStreamProvider
@@ -153,6 +165,7 @@ final class ChatViewModel: ObservableObject {
     /// laufenden Strom ab. Der lokale Zustand zeigt danach „nicht verbunden“.
     func disconnect() {
         resolvePendingConfirmations(approved: false, text: "Verbindung getrennt — nicht ausgeführt.")
+        voice?.stopSpeaking()
         streamTask?.cancel()
         streamTask = nil
         if isConnected {
@@ -177,15 +190,36 @@ final class ChatViewModel: ObservableObject {
 
         draft = ""
         notice = nil
+        // N4: der Nutzer sendet — laufendes Vorlesen endet sofort.
+        voice?.stopSpeaking()
         entries.append(Entry(kind: .user, text: text))
         turns.append(ChatTurn(role: .user, content: text))
         streamTask = Task { await run() }
+    }
+
+    /// Übernimmt ein diktiertes Ergebnis in den Entwurf (N6, §6).
+    ///
+    /// Der Text landet mit einem Leerzeichen getrennt in `draft` — genau dort,
+    /// wo getippter Text auch landet. **Gesendet wird nicht**: das bleibt
+    /// Sache von `send()`.
+    func appendDictation(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let combined = draft.isEmpty ? trimmed : draft + " " + trimmed
+        if combined.count > Limits.maxDraftCharacters {
+            draft = String(combined.prefix(Limits.maxDraftCharacters))
+            notice = "Der Entwurf wurde auf \(Limits.maxDraftCharacters) Zeichen gekürzt."
+        } else {
+            draft = combined
+        }
     }
 
     /// Bricht die laufende Antwort ab (spec-ios §10: jeder lange Vorgang ist
     /// abbrechbar). Ein Abbruch ist kein Fehler und kein Erfolg.
     func cancel() {
         resolvePendingConfirmations(approved: false, text: "Abgebrochen — nicht ausgeführt.")
+        voice?.stopSpeaking()
         streamTask?.cancel()
     }
 
@@ -229,6 +263,7 @@ final class ChatViewModel: ObservableObject {
     /// Löscht Verlauf und Historie; die Verbindung bleibt bestehen.
     func clear() {
         resolvePendingConfirmations(approved: false, text: "Verlauf gelöscht — nicht ausgeführt.")
+        voice?.stopSpeaking()
         streamTask?.cancel()
         streamTask = nil
         entries.removeAll()
@@ -260,6 +295,9 @@ final class ChatViewModel: ObservableObject {
                 if !outcome.assistantText.isEmpty {
                     turns.append(ChatTurn(role: .assistant, content: outcome.assistantText))
                 }
+                // N3: die Runde ist durch — der Restpuffer wird zur letzten
+                // Äußerung, damit der Schluss einer Antwort nicht verschluckt wird.
+                voice?.finishAssistantStream()
                 guard !outcome.toolRequests.isEmpty else { break }
                 guard rounds < Limits.maxToolRounds else {
                     // Teilstand melden statt weiterzulaufen oder Erfolg zu behaupten.
@@ -334,6 +372,7 @@ final class ChatViewModel: ObservableObject {
     /// Eine Antwortrunde: Text streamen, Werkzeuganforderungen einsammeln.
     private func streamOnce() async throws -> StreamOutcome {
         var assistantText = ""
+        var assistantEngine: ChatEngine?
         var agentEntryID: UUID?
         var toolRequests: [ToolCallRequest] = []
         var badgeIDs: [Int: UUID] = [:]
@@ -347,9 +386,20 @@ final class ChatViewModel: ObservableObject {
                    let index = entries.firstIndex(where: { $0.id == id }) {
                     entries[index].text += delta
                 } else {
-                    let entry = Entry(kind: .agent, text: delta)
+                    let entry = Entry(kind: .agent, text: delta, engine: assistantEngine)
                     agentEntryID = entry.id
                     entries.append(entry)
+                }
+                // N2: nur Agent-Text erreicht den Satzpuffer — nie Nutzertext.
+                voice?.ingestAssistantDelta(delta)
+
+            case .engine(let engine):
+                // N7: setzt `Entry.engine` und damit die Herkunft am Eintrag
+                // (§7). Der Anbieter schickt das Ereignis vor dem ersten Delta.
+                assistantEngine = engine
+                if let id = agentEntryID,
+                   let index = entries.firstIndex(where: { $0.id == id }) {
+                    entries[index].engine = engine
                 }
 
             case .toolCallStarted(let index, let name):

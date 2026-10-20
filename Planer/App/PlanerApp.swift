@@ -20,6 +20,10 @@ struct PlanerApp: App {
     @State private var isAuthenticating = false
     @State private var lockMessage: String?
 
+    /// Eine Sprachschicht für alle Tabs (spec-voice §6): erzeugt hier, per
+    /// `.environmentObject` an `AppRootView` und damit an Chat und To-Dos.
+    @StateObject private var voiceCoordinator = VoiceCoordinator()
+
     private let modelContainer: ModelContainer
 
     init() {
@@ -42,10 +46,14 @@ struct PlanerApp: App {
                     AppRootView()
                 }
             }
+            .environmentObject(voiceCoordinator)
             .task {
                 await unlockIfNeeded()
             }
             .onChange(of: scenePhase) { _, phase in
+                // §8.3: freihändig nur im Vordergrund — Hintergrund beendet
+                // Aufnahme und Ausgabe; `.active` startet nichts von selbst.
+                voiceCoordinator.handleScenePhase(phase)
                 switch phase {
                 case .background:
                     // Beim Verlassen sperren, damit der nächste Vordergrund

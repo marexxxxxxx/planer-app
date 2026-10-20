@@ -46,9 +46,33 @@ struct ToolCallRequest: Equatable, Sendable, Identifiable {
     let argumentsJSON: String
 }
 
+/// Herkunft einer Chat-Antwort (spec-voice Rev 2 §7, N7).
+///
+/// Zweck: die Oberfläche zeigt an jedem Assistenten-Eintrag, welches Modell
+/// geantwortet hat; ein stiller Wechsel ist damit per Bauart ausgeschlossen
+/// (§7 Regel 6).
+/// Grenze: in V3 liefert nur der Hermes-Anbieter `.hermes`. `.lokal` setzt
+/// erst der Router aus V5.
+enum ChatEngine: String, Equatable, Sendable {
+    /// Antwort von Hermes über den MCP-/Chat-Endpunkt.
+    case hermes
+    /// Antwort vom lokalen Modell auf dem Gerät (V5).
+    case lokal
+
+    /// Beschriftung der Herkunft an der Agent-Bubble.
+    var title: String {
+        switch self {
+        case .hermes:
+            return "Hermes"
+        case .lokal:
+            return "Gerät"
+        }
+    }
+}
+
 /// Ereignisse, die die Oberfläche kennt.
 ///
-/// Zweck: `ChatView`/`ChatViewModel` reagieren nur auf diese vier Fälle; der
+/// Zweck: `ChatView`/`ChatViewModel` reagieren nur auf diese Fälle; der
 /// Dialekt des Anbieters bleibt dahinter.
 /// Grenze: keine Werkzeugausführung. `toolCallFinished` ist eine **Anforderung**
 /// — ausgeführt wird sie über `MCPClient.callTool` (`tools/call`).
@@ -56,6 +80,8 @@ enum ChatStreamEvent: Equatable, Sendable {
     case textDelta(String)
     case toolCallStarted(index: Int, name: String)
     case toolCallFinished(ToolCallRequest)
+    /// Herkunft der Antwort, vor dem ersten `textDelta` (N7, §7).
+    case engine(ChatEngine)
     case finished(reason: String?)
 }
 
@@ -218,6 +244,9 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
                 )
             )
         }
+
+        // N7: die Herkunft steht fest, bevor der erste Text ankommt (§7).
+        continuation.yield(.engine(.hermes))
 
         if HermesHTTP.isEventStream(http) {
             try await consumeEventStream(bytes, continuation: continuation)
