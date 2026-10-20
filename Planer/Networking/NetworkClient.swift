@@ -19,7 +19,7 @@ enum HTTPMethod: String, Sendable {
 ///
 /// Zweck: Methode, Pfad, Query, optionaler JSON-Body und Protokoll-Header als
 /// Wertetyp.
-/// Grenze: **keine Authentifizierungs-Header.** `CF-Access-Client-Id/-Secret`
+/// Grenze: **keine Authentifizierungs-Header.** Die Cloudflare-Access-Header
 /// und `Authorization` setzt ausschließlich `NetworkClient.injectHeaders`;
 /// `headers` ist für Protokoll-Header wie `Mcp-Session-Id` oder `Content-Type`
 /// gedacht und wird von `injectHeaders` bei Namensgleichheit überschrieben.
