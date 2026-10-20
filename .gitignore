@@ -1,0 +1,26 @@
+# Xcode
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# Lokale Zugangsdaten — Secrets gehören in die Keychain, nie ins Repo.
+# (I2 legt die Keychain-Zugriffe an; hier nur der Schutz gegen versehentliche Dateien.)
+.env
+Config/*.local.json
+*.local.xcconfig

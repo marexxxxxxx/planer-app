@@ -1,0 +1,90 @@
+{
+  "meta": {
+    "version": 1,
+    "owner": "I1",
+    "swiftSource": "Planer/DesignSystem/DesignTokens.swift",
+    "note": "Maschinenlesbare Spiegelung der Swift-Tokens. Beide Dateien werden nur gemeinsam geändert. Farben sind iOS-Systemfarben; die Hex-Werte dokumentieren deren Light-/Dark-Werte und sind nicht separat gesetzt."
+  },
+  "color": {
+    "groupedBackground": {
+      "swift": "Palette.groupedBackground",
+      "semantic": "systemGroupedBackground",
+      "light": "#F2F2F7",
+      "dark": "#000000"
+    },
+    "secondaryBackground": {
+      "swift": "Palette.secondaryBackground",
+      "semantic": "secondarySystemBackground",
+      "light": "#F2F2F7",
+      "dark": "#1C1C1E"
+    },
+    "tertiaryBackground": {
+      "swift": "Palette.tertiaryBackground",
+      "semantic": "tertiarySystemBackground",
+      "light": "#FFFFFF",
+      "dark": "#2C2C2E"
+    },
+    "label": {
+      "swift": "Palette.label",
+      "semantic": "label",
+      "light": "#000000",
+      "dark": "#FFFFFF"
+    },
+    "secondaryLabel": {
+      "swift": "Palette.secondaryLabel",
+      "semantic": "secondaryLabel",
+      "light": "#3C3C43",
+      "lightOpacity": 0.6,
+      "dark": "#EBEBF5",
+      "darkOpacity": 0.6
+    },
+    "userBubble": {
+      "swift": "Palette.userBubble",
+      "semantic": "accentColor",
+      "light": "#2F6FED",
+      "dark": "#6C9BFF",
+      "note": "Platzhalter-Akzent der App (Assets.xcassets/AccentColor). Änderung an genau zwei Stellen: hier und im Colorset."
+    },
+    "agentBubble": {
+      "swift": "Palette.agentBubble",
+      "semantic": "secondarySystemBackground",
+      "light": "#F2F2F7",
+      "dark": "#1C1C1E"
+    },
+    "toolCallBubble": {
+      "swift": "Palette.toolCallBubble",
+      "semantic": "tertiarySystemBackground",
+      "light": "#FFFFFF",
+      "dark": "#2C2C2E"
+    },
+    "success": {
+      "swift": "Palette.success",
+      "semantic": "systemGreen",
+      "light": "#34C759",
+      "dark": "#30D158"
+    },
+    "danger": {
+      "swift": "Palette.danger",
+      "semantic": "systemRed",
+      "light": "#FF3B30",
+      "dark": "#FF453A"
+    }
+  },
+  "spacing": {
+    "xs": 4,
+    "s": 8,
+    "m": 12,
+    "l": 16,
+    "xl": 24
+  },
+  "radius": {
+    "card": 16,
+    "bubble": 18
+  },
+  "typography": {
+    "headline": "headline",
+    "body": "body",
+    "callout": "callout",
+    "footnote": "footnote"
+  }
+}
