@@ -775,6 +775,13 @@ actor MCPClient {
             envelope = try await readEnvelope(from: bytes, matching: expected)
         } else {
             let body = try await HermesHTTP.collect(bytes, limit: settings.maxResponseBytes)
+            if body.isEmpty, request.id == nil {
+                // Notification ohne Body (z. B. `202` mit leerem `200`): keine Antwort erwartet.
+                return TransportResponse(
+                    envelope: JSONRPCEnvelope(id: nil, result: nil, error: nil),
+                    sessionIdentifier: sessionIdentifier
+                )
+            }
             do {
                 envelope = try Self.decoder.decode(JSONRPCEnvelope.self, from: body)
             } catch {
