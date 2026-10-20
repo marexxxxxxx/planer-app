@@ -52,7 +52,7 @@ planer-app/
 │   ├── Networking/  NetworkClient, RetryPolicy, APIError, ServiceConfiguration
 │   ├── Keychain/    KeychainManager
 │   ├── Cache/       ModelContainer, Syncable, Entities
-│   └── Settings/    SettingsView, AppLockGate, AppLockSection, ServiceSettingsSection
+│   └── Settings/    SettingsView, AppLockSection, ServiceSettingsSection
 ```
 
 `Tests/Fixtures/` enthält Beispielantworten und JSON-Schemata für Tasks,
@@ -77,7 +77,7 @@ unberührt.
 **Naht zu I2:** `SettingsTabDefinition` (in `Planer/App/`) verweist auf
 `SettingsView` aus `Planer/Settings/`. `PlanerApp.swift` injiziert den
 `ModelContainer` aus `Planer/Cache/ModelContainer.swift` und legt das
-App-Lock-Gate (`AppLockGate`) vor die Tabs.
+App-Lock-Gate (Sperr-Oberfläche + `LocalAuthentication`) vor die Tabs.
 
 ## Design-Tokens
 

@@ -93,15 +93,11 @@ struct ServiceSettingsSection: View {
 
     /// Persistiert die Felder; leere Felder löschen den jeweiligen Account.
     ///
-    /// Eine nicht-leere Basis-URL wird vor dem Speichern gegen die
-    /// https-Regel aus `ServiceConfiguration` geprüft, damit eine http-Adresse
-    /// nicht als „Gespeichert.“ gilt und erst später als Offline-Fehler auffällt.
+    /// Die Basis-URL wird vor jedem Persistieren gegen die Transport-Regel aus
+    /// `ServiceConfiguration` geprüft, damit eine http-Fremd-Adresse als
+    /// sichtbarer Fehler endet und nicht erst später als „Offline“ auffällt.
     private func save() {
         do {
-            let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedBaseURL.isEmpty {
-                _ = try ServiceConfiguration.validateBaseURL(trimmedBaseURL, for: service)
-            }
             try persistFields()
             message = "Gespeichert."
         } catch {
@@ -110,6 +106,10 @@ struct ServiceSettingsSection: View {
     }
 
     private func persistFields() throws {
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedBaseURL.isEmpty {
+            _ = try ServiceConfiguration.validateBaseURL(trimmedBaseURL, for: service)
+        }
         try persist(baseURL, account: .baseURL)
         try persist(cloudflareClientID, account: .cloudflareClientID)
         try persist(cloudflareClientSecret, account: .cloudflareClientSecret)

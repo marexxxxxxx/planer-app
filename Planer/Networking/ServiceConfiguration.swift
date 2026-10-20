@@ -18,7 +18,7 @@ enum ServiceConfigurationError: Error, Equatable, LocalizedError {
         case .missingBaseURL(let service):
             return "Für \(service.displayName) ist keine Basis-URL hinterlegt."
         case .invalidBaseURL(let value):
-            return "Die Basis-URL muss eine gültige https-Adresse sein: \(value)"
+            return "Die Basis-URL muss eine gültige https-Adresse sein (http nur für localhost/127.0.0.1): \(value)"
         case .incompleteCloudflareCredentials(let service):
             return "Für \(service.displayName) sind CF-Access-Client-ID und -Secret nur unvollständig hinterlegt."
         }
@@ -42,7 +42,8 @@ struct ServiceConfiguration: Equatable, Sendable {
     /// Liest die Konfiguration des Dienstes aus der Keychain (spec-ios §4).
     ///
     /// - Throws: `ServiceConfigurationError`, wenn die Basis-URL fehlt oder
-    ///   keine gültige `https`-Adresse ist bzw. nur eine Hälfte des
+    ///   keine gültige `https`-Adresse ist (Ausnahme: `http` auf
+    ///   `localhost`/`127.0.0.1`) bzw. nur eine Hälfte des
     ///   CF-Access-Paares gesetzt ist.
     static func load(
         _ service: ServiceType,
@@ -84,23 +85,32 @@ struct ServiceConfiguration: Equatable, Sendable {
     /// Prüft einen Basis-URL-Wert gegen die Transport-Regel der App.
     ///
     /// Zweck: dieselbe Prüfung für das Laden aus der Keychain und für die
-    /// Eingabe in den Einstellungen; ausschließlich `https` ist zulässig.
+    /// Eingabe in den Einstellungen; zulässig ist ausschließlich `https`.
+    /// Ausnahme: `http` auf `localhost`/`127.0.0.1` für lokale Tests.
     /// Grenze: prüft nur Schema und Host, nicht die Erreichbarkeit.
     static func validateBaseURL(_ rawValue: String?, for service: ServiceType) throws -> URL {
         guard let value = normalized(rawValue) else {
             throw ServiceConfigurationError.missingBaseURL(service)
         }
-        // Ausschließlich https: die generierte Info.plist enthält bewusst keine
-        // ATS-Ausnahme, sonst würde eine http-URL erst zur Laufzeit als
-        // „offline“ scheitern (MARAAA-92, Review-Befund 9).
+        // Die generierte Info.plist enthält bewusst keine ATS-Ausnahme; eine
+        // http-Fremd-URL würde deshalb erst zur Laufzeit als „offline“
+        // scheitern. Sie wird darum schon bei der Eingabe abgelehnt
+        // (MARAAA-98, Review-Befund 9).
         guard let url = URL(string: value),
               let scheme = url.scheme?.lowercased(),
-              scheme == "https",
-              url.host != nil
+              let host = url.host?.lowercased()
         else {
             throw ServiceConfigurationError.invalidBaseURL(value)
         }
-        return url
+
+        switch scheme {
+        case "https":
+            return url
+        case "http" where host == "localhost" || host == "127.0.0.1":
+            return url
+        default:
+            throw ServiceConfigurationError.invalidBaseURL(value)
+        }
     }
 
     /// Trimmt Werte und behandelt leere Strings wie „nicht gesetzt“.
