@@ -2,8 +2,7 @@ import SwiftData
 import SwiftUI
 
 /// Einstiegspunkt der App: injiziert den SwiftData-Container aus I2 und zeigt die
-/// fünf Tabs. Den App-Lock liefert I2 als Abschnitt der Einstellungen
-/// (`AppLockSection`); ein Sperr-Gate vor dem Root-View ist dort nicht vorgesehen.
+/// fünf Tabs hinter dem App-Lock-Gate aus `AppLockGate` (spec-ios §5).
 @main
 struct PlanerApp: App {
 
@@ -22,7 +21,9 @@ struct PlanerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            AppRootView()
+            AppLockGate {
+                AppRootView()
+            }
         }
         .modelContainer(modelContainer)
     }

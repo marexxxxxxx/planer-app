@@ -92,8 +92,16 @@ struct ServiceSettingsSection: View {
     }
 
     /// Persistiert die Felder; leere Felder löschen den jeweiligen Account.
+    ///
+    /// Eine nicht-leere Basis-URL wird vor dem Speichern gegen die
+    /// https-Regel aus `ServiceConfiguration` geprüft, damit eine http-Adresse
+    /// nicht als „Gespeichert.“ gilt und erst später als Offline-Fehler auffällt.
     private func save() {
         do {
+            let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedBaseURL.isEmpty {
+                _ = try ServiceConfiguration.validateBaseURL(trimmedBaseURL, for: service)
+            }
             try persistFields()
             message = "Gespeichert."
         } catch {

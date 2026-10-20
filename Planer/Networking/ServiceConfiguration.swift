@@ -18,7 +18,7 @@ enum ServiceConfigurationError: Error, Equatable, LocalizedError {
         case .missingBaseURL(let service):
             return "Für \(service.displayName) ist keine Basis-URL hinterlegt."
         case .invalidBaseURL(let value):
-            return "Die Basis-URL ist ungültig: \(value)"
+            return "Die Basis-URL muss eine gültige https-Adresse sein: \(value)"
         case .incompleteCloudflareCredentials(let service):
             return "Für \(service.displayName) sind CF-Access-Client-ID und -Secret nur unvollständig hinterlegt."
         }
@@ -42,22 +42,14 @@ struct ServiceConfiguration: Equatable, Sendable {
     /// Liest die Konfiguration des Dienstes aus der Keychain (spec-ios §4).
     ///
     /// - Throws: `ServiceConfigurationError`, wenn die Basis-URL fehlt oder
-    ///   ungültig ist bzw. nur eine Hälfte des CF-Access-Paares gesetzt ist.
+    ///   keine gültige `https`-Adresse ist bzw. nur eine Hälfte des
+    ///   CF-Access-Paares gesetzt ist.
     static func load(
         _ service: ServiceType,
         keychain: KeychainManager = KeychainManager()
     ) throws -> ServiceConfiguration {
         let rawBaseURL = try keychain.value(for: service, account: .baseURL)
-        guard let baseURLValue = normalized(rawBaseURL) else {
-            throw ServiceConfigurationError.missingBaseURL(service)
-        }
-        guard let baseURL = URL(string: baseURLValue),
-              let scheme = baseURL.scheme?.lowercased(),
-              scheme == "https" || scheme == "http",
-              baseURL.host != nil
-        else {
-            throw ServiceConfigurationError.invalidBaseURL(baseURLValue)
-        }
+        let baseURL = try validateBaseURL(rawBaseURL, for: service)
 
         let clientID = normalized(try keychain.value(for: service, account: .cloudflareClientID))
         let clientSecret = normalized(try keychain.value(for: service, account: .cloudflareClientSecret))
@@ -87,6 +79,28 @@ struct ServiceConfiguration: Equatable, Sendable {
             apiKey: apiKey,
             apiToken: apiToken
         )
+    }
+
+    /// Prüft einen Basis-URL-Wert gegen die Transport-Regel der App.
+    ///
+    /// Zweck: dieselbe Prüfung für das Laden aus der Keychain und für die
+    /// Eingabe in den Einstellungen; ausschließlich `https` ist zulässig.
+    /// Grenze: prüft nur Schema und Host, nicht die Erreichbarkeit.
+    static func validateBaseURL(_ rawValue: String?, for service: ServiceType) throws -> URL {
+        guard let value = normalized(rawValue) else {
+            throw ServiceConfigurationError.missingBaseURL(service)
+        }
+        // Ausschließlich https: die generierte Info.plist enthält bewusst keine
+        // ATS-Ausnahme, sonst würde eine http-URL erst zur Laufzeit als
+        // „offline“ scheitern (MARAAA-92, Review-Befund 9).
+        guard let url = URL(string: value),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https",
+              url.host != nil
+        else {
+            throw ServiceConfigurationError.invalidBaseURL(value)
+        }
+        return url
     }
 
     /// Trimmt Werte und behandelt leere Strings wie „nicht gesetzt“.
