@@ -39,6 +39,10 @@ struct MealieView: View {
     }
 
     /// Baut das ViewModel mit dem Kontext aus I2 und lädt den ersten Stand.
+    /// Die Grocy-Ablage kommt aus `GrocyRepositoryProvider.shared(context:)` —
+    /// diese Instanz hält die app-weit geteilte Pending-Queue, die der
+    /// Einkaufs-Tab beim Öffnen liest und replays; der Rezepte-Tab legt keine
+    /// eigene an (G2-Befund 1).
     /// Explizit `@MainActor`, weil Repository- und ViewModel-Typen
     /// main-actor-isoliert sind.
     @MainActor

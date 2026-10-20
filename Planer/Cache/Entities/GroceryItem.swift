@@ -13,8 +13,15 @@ import SwiftData
 /// Zweck: zuletzt geladene Grocy-Daten offline anzeigen; `serverKey` verbindet
 /// Bestands- und Einkaufslisten-Einträge eindeutig mit dem Server
 /// (`stock:{product_id}` bzw. `list:{item_id}`). Zeilen mit `isDirty` sind
-/// dagegen lokal vorgemerkte Hinzufügen (`pending:{uuid}`), die noch nicht bei
-/// Grocy angekommen sind und einen App-Neustart überleben (spec-ios §3.2).
+/// dagegen das persistente Pending-Merkmal lokal vorgemerkter Hinzufügen
+/// (`pending:{uuid}`): sie liegen als Zeile im SwiftData-Store und überleben
+/// damit einen App-Neustart (spec-ios §3.2).
+///
+/// Replay nach Neustart: Beim Öffnen des Einkaufs-Tabs liest
+/// `GrocyRepository` alle Zeilen mit `isDirty == true` (älteste zuerst) und
+/// `replayPending()` überträgt sie in dieser Reihenfolge; erst nach
+/// erfolgreichem `add-product` wird die Zeile gelöscht. Fehlgeschlagene Zeilen
+/// bleiben stehen und werden beim nächsten Öffnen erneut versucht.
 /// Grenze: kein Netzwerkzugriff; Sync und Pending-Replay liegen bei I5.
 @Model
 final class GroceryItem: Syncable {

@@ -130,9 +130,17 @@ final class MealieRepository {
     /// Nicht in §2.4 aufgeführt, aber die einzige Mealie-v2-Quelle für
     /// `recipeIngredient[]` (RecipeSummary trägt keine Zutaten); §3.3 verlangt
     /// `ingredientsJSON` (siehe Abschlussbericht, ABWEICHUNG).
+    ///
+    /// Der `slug` stammt aus der Mealie-Antwort und wird vor der URL-Bildung als
+    /// einzelnes Pfad-Segment prozentkodiert; `/` und `%` sind dabei ausgenommen,
+    /// damit ein Serverwert keine zusätzlichen Segmente einschleusen kann
+    /// (G2-Befund 10).
     func fetchIngredients(slug: String) async throws -> [MealieIngredient] {
+        guard let segment = Self.pathSegment(slug) else {
+            throw APIError.invalidRequest("Ungültiger Rezept-Slug.")
+        }
         let detail = try await client.send(
-            APIRequest(method: .get, path: "\(Path.recipes)/\(slug)"),
+            APIRequest(method: .get, path: "\(Path.recipes)/\(segment)"),
             for: .mealie,
             as: MealieRecipeDetail.self
         )
@@ -156,22 +164,69 @@ final class MealieRepository {
         )
     }
 
+    /// Erlaubte Schemes für Bild-URLs aus der Mealie-Antwort (G2-Befund 10).
+    ///
+    /// Nur `https`: `file:`/`data:`-URLs haben in `AsyncImage` nichts zu suchen,
+    /// und die Basis-URL ist seit I2 ohnehin https-pflichtig.
+    static let allowedImageSchemes: Set<String> = ["https"]
+
     /// Macht aus Mealies relativem Bildpfad (`/api/media/…`) eine absolute URL.
     ///
-    /// `nil` bei fehlendem Pfad oder fehlender Basis-URL — ein fehlendes Bild
-    /// ist kein Fehlerzustand des Tabs.
+    /// Serverwerte werden vor der URL-Bildung geprüft: absolute URLs nur mit
+    /// einem Scheme aus `allowedImageSchemes`, relative Pfade werden in
+    /// Einzelsegmente zerlegt, prozentkodiert (`/` und `%` ausgenommen) und an
+    /// den https-Origin der Basis-URL gehängt. `nil` bei fehlendem Pfad,
+    /// fehlender Basis-URL oder nicht erlaubtem Scheme — ein fehlendes Bild ist
+    /// kein Fehlerzustand des Tabs.
     func imageURL(for rawPath: String?) -> URL? {
         guard let path = MealieText.nonEmpty(rawPath) else { return nil }
-        if let absolute = URL(string: path), absolute.scheme != nil {
+        if let absolute = URL(string: path), let scheme = absolute.scheme {
+            guard Self.allowedImageSchemes.contains(scheme.lowercased()) else { return nil }
             return absolute
         }
-        guard let base = imageBaseURL else { return nil }
+        guard let base = imageBaseURL,
+              let scheme = base.scheme?.lowercased(),
+              Self.allowedImageSchemes.contains(scheme),
+              let host = base.host,
+              let encoded = Self.encodedPath(path)
+        else { return nil }
         var components = URLComponents()
-        components.scheme = base.scheme
-        components.host = base.host
+        components.scheme = scheme
+        components.host = host
         components.port = base.port
-        components.path = path.hasPrefix("/") ? path : "/" + path
+        components.percentEncodedPath = encoded
         return components.url
+    }
+
+    /// Kodiert einen Serverwert als einzelnes Pfad-Segment.
+    ///
+    /// `/` und `%` fliegen aus der erlaubten Menge: `/` würde zusätzliche
+    /// Segmente erzeugen, ein rohes `%2F` würde beim Dekodieren wieder zu einem
+    /// Trenner.
+    static func pathSegment(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/%")
+        return trimmed.addingPercentEncoding(withAllowedCharacters: allowed)
+    }
+
+    /// Kodiert einen relativen Bildpfad segmentweise; `nil`, wenn nichts übrig
+    /// bleibt.
+    ///
+    /// `.`/`..`-Segmente werden verworfen, damit ein Serverwert nicht aus dem
+    /// erwarteten Pfad herausklettern kann.
+    static func encodedPath(_ raw: String) -> String? {
+        let segments = raw
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+            .filter { $0 != "." && $0 != ".." }
+        guard !segments.isEmpty else { return nil }
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/%")
+        let encoded = segments.compactMap { $0.addingPercentEncoding(withAllowedCharacters: allowed) }
+        guard encoded.count == segments.count else { return nil }
+        return "/" + encoded.joined(separator: "/")
     }
 
     // MARK: - Cache: Wochenplan
@@ -241,7 +296,7 @@ final class MealieRepository {
                 id: row.id,
                 name: row.name,
                 slug: nil,
-                imageURL: row.imageURL.flatMap { URL(string: $0) },
+                imageURL: imageURL(for: row.imageURL),
                 totalTime: row.totalTime,
                 servings: 0
             )
