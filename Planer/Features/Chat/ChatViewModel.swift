@@ -17,8 +17,9 @@ import Foundation
 /// hier.
 /// Grenze: kein HTTP und keine Header (das macht `MCPClient`) und kein
 /// Streaming-Dialekt (das macht `ChatStreamProvider`). **Werkzeugaufrufe sind
-/// default-deny:** ohne `readOnlyHint` wartet der Lauf auf `approveToolCall`
-/// bzw. `declineToolCall` (Action-Chips). Die Klasse ist `@MainActor`, weil sie
+/// default-deny:** ohne `readOnlyHint` entsteht eine `ToolCallConfirmation`,
+/// die als `pendingToolCall` wartet, bis `approveToolCall` oder
+/// `declineToolCall` kommt (Action-Chips). Die Klasse ist `@MainActor`, weil sie
 /// direkt SwiftUI-Zustand hält.
 @MainActor
 final class ChatViewModel: ObservableObject {
@@ -82,6 +83,14 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var notice: String?
     @Published private(set) var toolCount = 0
     @Published var draft = ""
+
+    /// Der Werkzeugaufruf, auf dessen Freigabe der Lauf gerade wartet.
+    ///
+    /// `nil` heißt: kein Chip offen, kein Aufruf blockiert. Gesetzt wird der
+    /// Wert ausschließlich in `waitForDecision(on:)`, geleert in jeder Auflösung
+    /// (Freigabe, Ablehnung, Abbruch, Trennen, Verlauf löschen) — ein Chip kann
+    /// sich damit nie auf einen anderen als den angezeigten Aufruf beziehen.
+    @Published private(set) var pendingToolCall: ToolCallConfirmation?
 
     private let mcpClient: MCPClient
     private let provider: ChatStreamProvider
@@ -191,7 +200,10 @@ final class ChatViewModel: ObservableObject {
     /// Grenze: wirkt nur auf einen Eintrag, der tatsächlich wartet; ein zweiter
     /// Tipp hat keine Wirkung und löst keinen zweiten Aufruf aus.
     func approveToolCall(_ entryID: UUID) {
-        guard let continuation = pendingConfirmations.removeValue(forKey: entryID) else { return }
+        guard pendingToolCall?.id == entryID,
+              let continuation = pendingConfirmations.removeValue(forKey: entryID)
+        else { return }
+        pendingToolCall = nil
         if let index = entries.firstIndex(where: { $0.id == entryID }) {
             entries[index].awaitsConfirmation = false
             entries[index].toolStatus = .running
@@ -206,7 +218,10 @@ final class ChatViewModel: ObservableObject {
     /// Werkzeug-Turn mit der Ablehnung, damit es nicht stillschweigend von einer
     /// Ausführung ausgeht.
     func declineToolCall(_ entryID: UUID) {
-        guard let continuation = pendingConfirmations.removeValue(forKey: entryID) else { return }
+        guard pendingToolCall?.id == entryID,
+              let continuation = pendingConfirmations.removeValue(forKey: entryID)
+        else { return }
+        pendingToolCall = nil
         markDeclined(entryID, text: "Vom Nutzer abgelehnt — nicht ausgeführt.")
         continuation.resume(returning: false)
     }
@@ -260,9 +275,16 @@ final class ChatViewModel: ObservableObject {
 
                     // Default deny: ohne ausdrückliche `readOnlyHint` wartet der
                     // Aufruf auf die Action-Chips. Erst „Ausführen“ sendet.
-                    if ToolCallPolicy.requiresConfirmation(for: tool(named: request.name)) {
+                    // `ToolCallPolicy` entscheidet, `ToolCallConfirmation` hält
+                    // die Entscheidung samt wartendem Aufruf.
+                    let confirmation = ToolCallConfirmation(
+                        id: badgeID,
+                        pendingToolCall: request,
+                        requiresConfirmation: ToolCallPolicy.requiresConfirmation(for: tool(named: request.name))
+                    )
+                    if confirmation.requiresConfirmation {
                         setAwaitingConfirmation(badgeID)
-                        let approved = await waitForDecision(on: badgeID)
+                        let approved = await waitForDecision(on: confirmation)
                         try Task.checkCancellation()
                         guard approved else {
                             recordDecline(request, badgeID: badgeID)
@@ -378,10 +400,19 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Hält den Lauf an, bis der Nutzer einen Chip tippt oder der Lauf endet.
-    private func waitForDecision(on entryID: UUID) async -> Bool {
-        await withCheckedContinuation { continuation in
+    ///
+    /// Setzt `pendingToolCall` für die Dauer des Wartens: der angezeigte Chip
+    /// und der blockierte Aufruf sind damit derselbe Wert. Endet das Warten ohne
+    /// Entscheidung (Abbruch, Trennen), räumt `resolvePendingConfirmations` den
+    /// Wert ab.
+    private func waitForDecision(on confirmation: ToolCallConfirmation) async -> Bool {
+        let entryID = confirmation.id
+        pendingToolCall = confirmation
+        let approved: Bool = await withCheckedContinuation { continuation in
             pendingConfirmations[entryID] = continuation
         }
+        pendingToolCall = nil
+        return approved
     }
 
     /// Löst alle offenen Chips auf (Abbruch, Trennen, Verlauf löschen), damit
@@ -389,6 +420,7 @@ final class ChatViewModel: ObservableObject {
     private func resolvePendingConfirmations(approved: Bool, text: String) {
         let pending = pendingConfirmations
         pendingConfirmations.removeAll()
+        pendingToolCall = nil
         for (entryID, continuation) in pending {
             if !approved {
                 markDeclined(entryID, text: text)
@@ -423,10 +455,17 @@ final class ChatViewModel: ObservableObject {
 
     /// Führt einen angeforderten Werkzeugaufruf aus (`tools/call`).
     ///
+    /// **Schreibende Werkzeuge erreichen diese Stelle nie ohne Freigabe.** Der
+    /// einzige Aufrufer ist die Schleife in `run()`, und die prüft vorher
+    /// `ToolCallConfirmation.requiresConfirmation`: ist es `true`, wartet sie in
+    /// `waitForDecision(on:)` auf `approveToolCall`. Bei `declineToolCall`,
+    /// Abbruch, Trennen oder „Verlauf löschen“ wird der Aufruf verworfen und
+    /// `recordDecline` an das Modell gemeldet — der Server sieht ihn nicht.
+    /// Automatisch laufen nur Aufrufe, deren Werkzeug der Server ausdrücklich
+    /// mit `readOnlyHint: true` als lesend deklariert hat.
+    ///
     /// Grenze: ein Fehler wird als Werkzeug-Ergebnis an das Modell und als
     /// Badge an die Oberfläche gegeben — kein Absturz, kein stiller Erfolg.
-    /// Der Aufruf kommt nur hier an, wenn `ToolCallPolicy` ihn freigegeben hat
-    /// oder der Nutzer „Ausführen“ getippt hat.
     private func execute(_ request: ToolCallRequest, badgeID: UUID?) async {
         do {
             let arguments = try parseArguments(request.argumentsJSON)
