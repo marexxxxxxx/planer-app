@@ -4,8 +4,9 @@ Native SwiftUI-Client für den selbstgehosteten Hermes Agent (MCP), das
 To-Do-Dashboard (`hermes_tasks`), Grocy und Mealie. Fünf Tabs, Secrets
 ausschließlich in der Keychain, iOS 17 als Mindestziel.
 
-Dieses Repository enthält den Stand **WP I1 — Design-System & App-Shell**.
-Die Feature-Tabs sind bewusst Stubs; sie gehören den WPs I3–I6.
+Dieses Repository enthält den Stand der WPs **I1–I6**: Design-System und
+App-Shell (I1), Einstellungen und App-Lock (I2), Chat (I3), To-Dos (I4),
+Einkauf (I5) und Rezepte (I6). Alle fünf Tabs sind implementiert.
 
 ## Öffnen und bauen
 
@@ -22,35 +23,40 @@ open Planer.xcodeproj
   ab iOS 18; `AppRootView` hat dafür einen Availability-Zweig mit
   `.tabItem`-Fallback. Kein Mindestziel anheben, ohne die Vorgabe zu ändern.
 - Debuggen/Testen im Simulator ist nur auf einem Mac möglich.
+- Das App-Icon liegt als einzelnes 1024×1024-PNG in
+  `Planer/App/Assets.xcassets/AppIcon.appiconset/`; Xcode skaliert es für die
+  übrigen Größen und übernimmt die Maskierung.
 
-## Struktur (I1)
+## Struktur
 
 ```
 planer-app/
 ├── Planer.xcodeproj/project.pbxproj   App-Target, synchronisierte Ordner
 ├── Config/DesignTokens.json           maschinenlesbare Token-Spiegelung
+├── Tests/                             statische Regressionstests + Fixtures
 ├── Planer/
 │   ├── App/
-│   │   ├── PlanerApp.swift            @main
+│   │   ├── PlanerApp.swift            @main, ModelContainer + App-Lock-Gate
 │   │   ├── AppRootView.swift          TabView, 5 Tabs
 │   │   ├── TabRegistry.swift          AppTab + TabDefinition + Registry
-│   │   ├── SettingsTabDefinition.swift   Tab 5 → I2-SettingsView
-│   │   └── Assets.xcassets/           AccentColor, AppIcon (leer)
+│   │   ├── SettingsTabDefinition.swift   Tab 5 → SettingsView
+│   │   └── Assets.xcassets/           AccentColor, AppIcon
 │   ├── DesignSystem/
 │   │   ├── DesignTokens.swift         Farben, Abstände, Radien, Typografie
-│   │   └── Components/
-│   │       ├── MessageBubbleView.swift    user | agent | toolCall
-│   │       ├── SettingsRowView.swift      Label + Feld + Status-Punkt
-│   │       └── UnifiedListItemView.swift  Liste für To-Dos/Einkauf/Rezepte
-│   └── Features/
-│       ├── Chat/    ChatView.swift, ChatTabDefinition.swift       (I3)
-│       ├── Todos/   TodosView.swift, TodosTabDefinition.swift     (I4)
-│       ├── Grocy/   GrocyView.swift, GrocyTabDefinition.swift     (I5)
-│       └── Mealie/  MealieView.swift, MealieTabDefinition.swift   (I6)
+│   │   └── Components/                MessageBubbleView, SettingsRowView, UnifiedListItemView
+│   ├── Features/
+│   │   ├── Chat/    ChatView, ChatViewModel, MCPClient, MCPSession, ToolCallPolicy
+│   │   ├── Todos/   TodosView, TodosViewModel, TodoRepository, TodoEditorSheet
+│   │   ├── Grocy/   GrocyView, GrocyViewModel, GrocyRepository, GrocyDTO
+│   │   └── Mealie/  MealieView, MealieViewModel, MealieRepository, MealieDTO
+│   ├── Networking/  NetworkClient, RetryPolicy, APIError, ServiceConfiguration
+│   ├── Keychain/    KeychainManager
+│   ├── Cache/       ModelContainer, Syncable, Entities
+│   └── Settings/    SettingsView, AppLockGate, AppLockSection, ServiceSettingsSection
 ```
 
-`Planer/Networking/`, `Planer/Keychain/`, `Planer/Cache/` und `Planer/Settings/`
-gehören I2 und werden von I1 nicht angefasst.
+`Tests/Fixtures/` enthält Beispielantworten und JSON-Schemata für Tasks,
+Grocy und Mealie.
 
 ## Tab-Anbindung
 
@@ -68,11 +74,10 @@ unberührt.
 | 4 | Rezepte | `fork.knife` | `MealieTabDefinition` | I6 |
 | 5 | Einstellungen | `gearshape` | `SettingsTabDefinition` | I2 |
 
-**Übergabe an I2:** `SettingsTabDefinition` (in `Planer/App/`) verweist auf
+**Naht zu I2:** `SettingsTabDefinition` (in `Planer/App/`) verweist auf
 `SettingsView` aus `Planer/Settings/`. `PlanerApp.swift` injiziert den
-`ModelContainer` aus `Planer/Cache/ModelContainer.swift`. Beide Dateien kommen
-von I2 und sind damit Voraussetzung für einen Build; die vier I2-Ordner selbst
-fasst I1 nicht an.
+`ModelContainer` aus `Planer/Cache/ModelContainer.swift` und legt das
+App-Lock-Gate (`AppLockGate`) vor die Tabs.
 
 ## Design-Tokens
 
@@ -81,7 +86,7 @@ maschinenlesbare Spiegelung derselben Werte. Beide werden **nur gemeinsam**
 geändert. Farben sind iOS-Systemfarben (Light/Dark automatisch); der Akzent ist
 ein Platzhalter in `Assets.xcassets/AccentColor.colorset` und im JSON vermerkt.
 
-## Statische Abnahme I1
+## Statische Abnahme
 
 Ohne Swift-Toolchain prüfbar:
 
@@ -90,7 +95,12 @@ grep -c 'Tab(' Planer/App/AppRootView.swift          # erwartet: 5
 for s in bubble.left.and.bubble.right checklist cart fork.knife gearshape; do
   grep -q "$s" Planer/App/AppRootView.swift && echo "OK  $s" || echo "FEHLT $s"
 done
+
+for t in Tests/verify_*.sh; do bash "$t"; done
 ```
+
+Die Skripte unter `Tests/` prüfen die Regressionsbefunde der WPs I2–I6
+statisch ohne Swift-Toolchain und enden mit `Ergebnis: OK`.
 
 Kompilierung, Rendering und Light/Dark-Darstellung sind **nur auf Mac prüfbar**
 und nicht Teil des binären Kriteriums.
