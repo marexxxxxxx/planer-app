@@ -50,9 +50,9 @@ struct MealieTransferResult: Equatable {
 ///
 /// Zweck: Cache-Regel aus §3.3 (Server zuerst, bei Fehler letzter Cache) und
 /// der Grocy-Schreibpfad aus AD-8/§2.3.
-/// Grenze: keine Schreibzugriffe auf Mealie; die Grocy-Pending-Queue (I5) ist
-/// flüchtig, aber app-weit geteilt und wird beim Öffnen des Einkaufs-Tabs
-/// übertragen.
+/// Grenze: keine Schreibzugriffe auf Mealie; die Grocy-Pending-Queue (I5) liegt
+/// persistent im Cache, ist app-weit geteilt und wird beim Öffnen des
+/// Einkaufs-Tabs übertragen.
 @MainActor
 final class MealieViewModel: ObservableObject {
 
@@ -254,16 +254,14 @@ final class MealieViewModel: ObservableObject {
                 continue
             }
             if offline {
-                grocy.enqueue(productID: product.id, amount: 1, note: ingredient.display)
-                queued += 1
+                if enqueue(product, note: ingredient.display) { queued += 1 } else { failed += 1 }
                 continue
             }
             do {
                 try await grocy.addProduct(productID: product.id, amount: 1, note: ingredient.display)
                 added += 1
             } catch let error as APIError where error.isRetryable {
-                grocy.enqueue(productID: product.id, amount: 1, note: ingredient.display)
-                queued += 1
+                if enqueue(product, note: ingredient.display) { queued += 1 } else { failed += 1 }
                 offline = true
             } catch {
                 failed += 1
@@ -275,6 +273,18 @@ final class MealieViewModel: ObservableObject {
             failed: failed,
             unmatched: unmatched
         )
+    }
+
+    /// Legt eine Zutat in die persistente Pending-Queue (§3.2).
+    /// `false`, wenn der Cache die Operation nicht aufnehmen konnte; der
+    /// Aufrufer zählt das als Fehlschlag statt als vorgemerkt.
+    private func enqueue(_ product: GrocyProduct, note: String) -> Bool {
+        do {
+            try grocy.enqueue(name: product.name, productID: product.id, amount: 1, note: note)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func detail(_ error: Error) -> String {

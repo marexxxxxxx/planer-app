@@ -12,9 +12,9 @@ import Foundation
 ///
 /// Zweck: Cache-Regel aus §3.2 (frisch → Cache, sonst Server, Server gewinnt),
 /// die Autovervollständigung aus dem Produktkatalog und das Übertragen der
-/// app-weit geteilten Pending-Queue aus I5/I6.
-/// Grenze: keine Persistenz der Pending-Queue über einen App-Neustart hinaus;
-/// das bräuchte ein Feld in `GroceryItem` (I2) oder eine zweite Ablage.
+/// app-weit geteilten, persistenten Pending-Queue aus I5/I6.
+/// Grenze: die Queue wird beim Öffnen des Tabs und auf Knopfdruck übertragen,
+/// nicht durch einen Netzwerk-Monitor.
 @MainActor
 final class GrocyViewModel: ObservableObject {
 
@@ -88,9 +88,14 @@ final class GrocyViewModel: ObservableObject {
             try await repository.addProduct(productID: product.id, amount: amount)
             await refresh()
         } catch let error as APIError where error.isRetryable {
-            repository.enqueue(productID: product.id, amount: amount)
-            pendingCount = repository.pendingAdds.count
-            banner = "Offline — „\(product.name)“ wird übertragen, sobald Grocy erreichbar ist."
+            do {
+                try repository.enqueue(name: product.name, productID: product.id, amount: amount)
+                pendingCount = repository.pendingAdds.count
+                banner = "Offline — „\(product.name)“ wird übertragen, sobald Grocy erreichbar ist."
+            } catch {
+                shopping.removeAll { $0.id == optimistic.id }
+                banner = "„\(product.name)“ konnte nicht vorgemerkt werden: \(error.localizedDescription)"
+            }
         } catch {
             shopping.removeAll { $0.id == optimistic.id }
             banner = "„\(product.name)“ konnte nicht hinzugefügt werden: \(error.localizedDescription)"

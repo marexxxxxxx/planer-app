@@ -12,7 +12,9 @@ import SwiftData
 ///
 /// Zweck: zuletzt geladene Grocy-Daten offline anzeigen; `serverKey` verbindet
 /// Bestands- und Einkaufslisten-Einträge eindeutig mit dem Server
-/// (`stock:{product_id}` bzw. `list:{item_id}`).
+/// (`stock:{product_id}` bzw. `list:{item_id}`). Zeilen mit `isDirty` sind
+/// dagegen lokal vorgemerkte Hinzufügen (`pending:{uuid}`), die noch nicht bei
+/// Grocy angekommen sind und einen App-Neustart überleben (spec-ios §3.2).
 /// Grenze: kein Netzwerkzugriff; Sync und Pending-Replay liegen bei I5.
 @Model
 final class GroceryItem: Syncable {
@@ -29,6 +31,9 @@ final class GroceryItem: Syncable {
     var bestBeforeDate: Date?
     var isExpired: Bool
     var fetchedAt: Date
+    /// Lokal vorgemerktes Hinzufügen, noch nicht an Grocy übertragen
+    /// (spec-ios §3.2 Pending-Queue). `false` gilt für Server-Cache-Zeilen.
+    var isDirty: Bool
 
     init(
         serverKey: String,
@@ -42,7 +47,8 @@ final class GroceryItem: Syncable {
         done: Bool = false,
         bestBeforeDate: Date? = nil,
         isExpired: Bool = false,
-        fetchedAt: Date = Date()
+        fetchedAt: Date = Date(),
+        isDirty: Bool = false
     ) {
         self.serverKey = serverKey
         self.kind = kind
@@ -56,6 +62,7 @@ final class GroceryItem: Syncable {
         self.bestBeforeDate = bestBeforeDate
         self.isExpired = isExpired
         self.fetchedAt = fetchedAt
+        self.isDirty = isDirty
     }
 
     /// Gültigkeitsdauer des Read-through-Cache in Sekunden (spec-ios §3.2).

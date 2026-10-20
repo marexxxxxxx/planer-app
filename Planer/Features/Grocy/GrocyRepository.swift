@@ -21,16 +21,6 @@ struct GrocySnapshot: Equatable {
     let catalog: [GrocyProduct]
 }
 
-/// Ein Hinzufügen, das noch nicht bei Grocy angekommen ist (§3.2 Pending-Queue).
-struct GrocyPendingAdd: Equatable, Identifiable {
-    let id: UUID
-    let productID: Int
-    let amount: Double
-    let note: String?
-    /// `true`, wenn der letzte Replay-Versuch fehlgeschlagen ist.
-    var failed: Bool
-}
-
 /// Ergebnis eines Replay-Laufs der Pending-Queue.
 struct GrocyReplayResult: Equatable {
     let succeeded: Int
@@ -87,12 +77,12 @@ extension GrocyRow {
 /// SwiftData-Cache aus I2.
 ///
 /// Zweck: eine Stelle für die vier Endpunkte aus §2.3, die Cache-Regel aus §3.2
-/// (TTL 600 s, Server gewinnt) und die Pending-Queue für Offline-Hinzufügen.
-/// Die Instanz wird app-weit über `GrocyRepositoryProvider` geteilt, damit
-/// Rezepte- und Einkaufs-Tab auf derselben Queue arbeiten.
-/// Grenze: keine UI-Zustände; die Pending-Queue ist bewusst flüchtig, weil die
-/// Cache-Entities aus I2 kein Pending-Feld haben und `Planer/Cache/**` für I5
-/// gesperrt ist (siehe Abschlussbericht, OFFEN).
+/// (TTL 600 s, Server gewinnt) und die persistente Pending-Queue für
+/// Offline-Hinzufügen. Die Instanz wird app-weit über `GrocyRepositoryProvider`
+/// geteilt, damit Rezepte- und Einkaufs-Tab auf derselben Queue arbeiten.
+/// Grenze: keine UI-Zustände; die Queue liegt als `isDirty`-Zeile im Cache und
+/// wird nur beim Öffnen des Tabs bzw. auf Knopfdruck übertragen, nicht durch
+/// einen Netzwerk-Monitor.
 @MainActor
 final class GrocyRepository {
 
@@ -110,7 +100,18 @@ final class GrocyRepository {
     private let calendar: Calendar
 
     /// Noch nicht übertragene Hinzufügen-Operationen, älteste zuerst.
-    private(set) var pendingAdds: [GrocyPendingAdd] = []
+    ///
+    /// Quelle ist der SwiftData-Cache (`GroceryItem.isDirty`, §3.2); damit
+    /// übersteht die Queue einen App-Neustart. Ein Lesefehler liefert eine leere
+    /// Liste, verliert aber keine Daten: die Zeilen bleiben gespeichert und
+    /// `replayPending()` meldet den Fehler als Fehlschlag.
+    var pendingAdds: [GroceryItem] {
+        do {
+            return try pendingItems()
+        } catch {
+            return []
+        }
+    }
 
     init(
         client: NetworkClient = NetworkClient(),
@@ -127,10 +128,14 @@ final class GrocyRepository {
     // MARK: - Lesen und Cache
 
     /// Liest die zwischengespeicherten Einträge einer Art, nach Name sortiert.
+    ///
+    /// Queue-Zeilen (`isDirty`) bleiben außen vor: sie sind keine Serverdaten
+    /// und dürfen beim Ersetzen des Caches nicht als „verschwunden“ gelöscht
+    /// werden (§3.2, Server gewinnt nur über Serverdaten).
     func cachedItems(kind: GrocyCacheKind) throws -> [GroceryItem] {
         let rawKind = kind.rawValue
         let descriptor = FetchDescriptor<GroceryItem>(
-            predicate: #Predicate { $0.kind == rawKind },
+            predicate: #Predicate { $0.kind == rawKind && $0.isDirty == false },
             sortBy: [SortDescriptor(\GroceryItem.name)]
         )
         return try context.fetch(descriptor)
@@ -235,39 +240,63 @@ final class GrocyRepository {
         )
     }
 
-    /// Legt ein Hinzufügen in die Pending-Queue (§3.2, offline).
-    func enqueue(productID: Int, amount: Double, note: String? = nil) {
-        pendingAdds.append(
-            GrocyPendingAdd(
-                id: UUID(),
-                productID: productID,
-                amount: amount,
-                note: note,
-                failed: false
-            )
+    /// Legt ein Hinzufügen dauerhaft in die Pending-Queue (§3.2, offline).
+    ///
+    /// Die Operation ist eine Cache-Zeile mit `isDirty` und eigenem
+    /// `pending:{uuid}`-Schlüssel; `fetchedAt` hält ihre Reihenfolge fest. Ein
+    /// Fehler beim Speichern wird geworfen, damit der Aufrufer ihn meldet statt
+    /// die Operation stillschweigend zu verlieren.
+    func enqueue(name: String, productID: Int, amount: Double, note: String? = nil) throws {
+        let item = GroceryItem(
+            serverKey: "pending:\(UUID().uuidString)",
+            kind: GrocyCacheKind.shopping.rawValue,
+            productId: productID,
+            name: name,
+            amount: amount,
+            unit: "",
+            note: note,
+            fetchedAt: now(),
+            isDirty: true
         )
+        context.insert(item)
+        try context.save()
     }
 
-    /// Replay der Pending-Queue in Reihenfolge; Fehlschläge bleiben als
-    /// `failed` markiert in der Queue (§3.2).
+    /// Replay der persistenten Pending-Queue in Reihenfolge (§3.2).
+    ///
+    /// Erfolgreich übertragene Zeilen werden gelöscht; fehlgeschlagene bleiben
+    /// `isDirty` und werden beim nächsten Lauf erneut versucht.
     func replayPending() async -> GrocyReplayResult {
-        var remaining: [GrocyPendingAdd] = []
+        let queued: [GroceryItem]
+        do {
+            queued = try pendingItems()
+        } catch {
+            // Ohne lesbaren Cache ist kein Replay möglich; als Fehlschlag
+            // melden, damit die Ansicht keinen Erfolg suggeriert.
+            return GrocyReplayResult(succeeded: 0, failed: 1)
+        }
+
         var succeeded = 0
-        for var pending in pendingAdds {
+        var failed = 0
+        for item in queued {
+            guard let productID = item.productId else {
+                failed += 1
+                continue
+            }
             do {
                 try await addProduct(
-                    productID: pending.productID,
-                    amount: pending.amount,
-                    note: pending.note
+                    productID: productID,
+                    amount: item.amount,
+                    note: item.note
                 )
+                context.delete(item)
+                try context.save()
                 succeeded += 1
             } catch {
-                pending.failed = true
-                remaining.append(pending)
+                failed += 1
             }
         }
-        pendingAdds = remaining
-        return GrocyReplayResult(succeeded: succeeded, failed: remaining.count)
+        return GrocyReplayResult(succeeded: succeeded, failed: failed)
     }
 
     // MARK: - Cache-Schreiben
@@ -353,6 +382,15 @@ final class GrocyRepository {
     private func cacheByServerKey(kind: GrocyCacheKind) throws -> [String: GroceryItem] {
         let items = try cachedItems(kind: kind)
         return Dictionary(items.map { ($0.serverKey, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Zeilen der persistenten Pending-Queue, älteste zuerst (§3.2).
+    private func pendingItems() throws -> [GroceryItem] {
+        let descriptor = FetchDescriptor<GroceryItem>(
+            predicate: #Predicate { $0.isDirty == true },
+            sortBy: [SortDescriptor(\GroceryItem.fetchedAt)]
+        )
+        return try context.fetch(descriptor)
     }
 }
 
