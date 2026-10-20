@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Grocy stock normalisiert (§2.3)",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["product_id", "name", "amount", "unit", "is_expired"],
+    "properties": {
+      "product_id":       { "type": "integer" },
+      "name":             { "type": "string" },
+      "amount":           { "type": "number" },
+      "unit":             { "type": "string" },
+      "best_before_date": { "type": ["string", "null"], "format": "date" },
+      "is_expired":       { "type": "boolean" }
+    },
+    "additionalProperties": true
+  }
+}

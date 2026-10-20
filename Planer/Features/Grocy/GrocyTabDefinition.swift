@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Stub-Tab-Provider für Einkauf. Gehört I5 und wird dort ersetzt.
+/// Tab-Provider für Einkauf (I5): liefert die Einkaufs-/Vorrats-Ansicht.
 enum GrocyTabDefinition: TabDefinition {
     static func makeRootView() -> some View {
         GrocyView()

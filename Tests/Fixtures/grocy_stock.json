@@ -1,0 +1,34 @@
+[
+  {
+    "product_id": 1,
+    "name": "Vollmilch",
+    "amount": 2,
+    "unit": "Packung",
+    "best_before_date": "2026-10-24",
+    "is_expired": false
+  },
+  {
+    "product_id": 2,
+    "name": "Bananen",
+    "amount": 1.5,
+    "unit": "kg",
+    "best_before_date": null,
+    "is_expired": false
+  },
+  {
+    "product_id": 3,
+    "name": "Joghurt",
+    "amount": 0,
+    "unit": "Becher",
+    "best_before_date": "2026-10-01",
+    "is_expired": true
+  },
+  {
+    "product_id": 4,
+    "name": "Mehl",
+    "amount": 0.75,
+    "unit": "kg",
+    "best_before_date": "2027-03-31",
+    "is_expired": false
+  }
+]
