@@ -1,0 +1,58 @@
+[
+  {
+    "date": "2026-10-19",
+    "meal_type": "breakfast",
+    "recipe_id": "0f4b9d3e-1c2a-4f6b-8d7e-9a1c2b3d4e5f",
+    "recipe_name": "Porridge mit Beeren",
+    "recipe_scale": 1
+  },
+  {
+    "date": "2026-10-19",
+    "meal_type": "dinner",
+    "recipe_id": "5a2c7e18-9b4d-4c31-a6f0-2d8e1b7c9a03",
+    "recipe_name": "Linsensuppe",
+    "recipe_scale": 1.5
+  },
+  {
+    "date": "2026-10-20",
+    "meal_type": "lunch",
+    "recipe_id": "c3d8e6f2-7a1b-4e59-9c04-6b2f8a1d3e70",
+    "recipe_name": "Gemüsecurry mit Reis",
+    "recipe_scale": 2
+  },
+  {
+    "date": "2026-10-21",
+    "meal_type": "breakfast",
+    "recipe_id": "0f4b9d3e-1c2a-4f6b-8d7e-9a1c2b3d4e5f",
+    "recipe_name": "Porridge mit Beeren",
+    "recipe_scale": 1
+  },
+  {
+    "date": "2026-10-21",
+    "meal_type": "dinner",
+    "recipe_id": "8e1f4a72-5c3d-4b90-8a6e-1d7c2b9f0e48",
+    "recipe_name": "Ofenkartoffeln mit Kräuterquark",
+    "recipe_scale": 1
+  },
+  {
+    "date": "2026-10-23",
+    "meal_type": "dinner",
+    "recipe_id": "d6b0a3c5-2e8f-4a17-b9d4-7c1e5f8a2b63",
+    "recipe_name": "Pasta mit Tomatensauce",
+    "recipe_scale": 0.5
+  },
+  {
+    "date": "2026-10-24",
+    "meal_type": "lunch",
+    "recipe_id": "3b7c9e21-4d6a-4f80-9e2b-5a8c1d3f7b09",
+    "recipe_name": "Kartoffelsalat mit Würstchen",
+    "recipe_scale": 1.5
+  },
+  {
+    "date": "2026-10-25",
+    "meal_type": "dessert",
+    "recipe_id": "a1e5c8d4-6f2b-4c93-8d07-3e9b6a2f1c54",
+    "recipe_name": "Apfelkuchen",
+    "recipe_scale": 2
+  }
+]

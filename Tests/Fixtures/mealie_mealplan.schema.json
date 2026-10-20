@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mealie meal plan normalisiert (§2.4)",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "date",
+      "meal_type",
+      "recipe_id",
+      "recipe_name",
+      "recipe_scale"
+    ],
+    "properties": {
+      "date": {
+        "type": "string",
+        "format": "date"
+      },
+      "meal_type": {
+        "type": "string"
+      },
+      "recipe_id": {
+        "type": "string"
+      },
+      "recipe_name": {
+        "type": "string"
+      },
+      "recipe_scale": {
+        "type": "number"
+      }
+    },
+    "additionalProperties": true
+  }
+}
