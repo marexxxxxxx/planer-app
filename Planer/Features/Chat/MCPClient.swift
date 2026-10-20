@@ -195,6 +195,27 @@ struct JSONRPCEnvelope: Decodable {
 
 // MARK: - MCP-Nutzlasten
 
+/// Die MCP-Werkzeug-Annotationen, soweit sie die Freigabeentscheidung tragen.
+///
+/// Zweck: `readOnlyHint` ist die einzige Aussage des Servers, die ein Werkzeug
+/// ohne Nebenwirkung verspricht; sie entscheidet über die Bestätigungspflicht
+/// (`ToolCallPolicy`).
+/// Grenze: alle Felder optional und nicht vertrauenswürdig — fehlt die
+/// Annotation, gilt das Werkzeug als schreibend (Default deny).
+struct MCPToolAnnotations: Decodable, Equatable, Sendable {
+    let readOnlyHint: Bool?
+    let destructiveHint: Bool?
+    let idempotentHint: Bool?
+    let openWorldHint: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case readOnlyHint
+        case destructiveHint
+        case idempotentHint
+        case openWorldHint
+    }
+}
+
 /// Ein Werkzeug aus `tools/list`.
 struct MCPTool: Decodable, Equatable, Sendable, Identifiable {
     let name: String
@@ -202,6 +223,8 @@ struct MCPTool: Decodable, Equatable, Sendable, Identifiable {
     let description: String?
     /// Bleibt opak: wird unverändert an den Chat-Anbieter weitergegeben.
     let inputSchema: JSONValue
+    /// Server-Aussage über Nebenwirkungen; `nil` = unbekannt = bestätigungspflichtig.
+    let annotations: MCPToolAnnotations?
 
     var id: String { name }
 
@@ -210,18 +233,21 @@ struct MCPTool: Decodable, Equatable, Sendable, Identifiable {
         case title
         case description
         case inputSchema
+        case annotations
     }
 
     init(
         name: String,
         title: String? = nil,
         description: String? = nil,
-        inputSchema: JSONValue = .object(["type": .string("object")])
+        inputSchema: JSONValue = .object(["type": .string("object")]),
+        annotations: MCPToolAnnotations? = nil
     ) {
         self.name = name
         self.title = title
         self.description = description
         self.inputSchema = inputSchema
+        self.annotations = annotations
     }
 
     init(from decoder: Decoder) throws {
@@ -231,6 +257,7 @@ struct MCPTool: Decodable, Equatable, Sendable, Identifiable {
         description = try container.decodeIfPresent(String.self, forKey: .description)
         inputSchema = try container.decodeIfPresent(JSONValue.self, forKey: .inputSchema)
             ?? .object(["type": .string("object")])
+        annotations = try container.decodeIfPresent(MCPToolAnnotations.self, forKey: .annotations)
     }
 }
 
@@ -361,66 +388,14 @@ struct ServerSentEventDecoder {
 
 // MARK: - Hermes-Transport
 
-/// Setzt die Hermes-Header an genau einer Stelle des Chat-Features.
-///
-/// Zweck: Cloudflare-Access-Paar und Bearer-Token kommen ausschließlich aus
-/// `ServiceConfiguration` (also aus der Keychain) und werden nirgends sonst im
-/// Chat-Ordner gelesen.
-/// Grenze: **Abweichung von Review-Check 1 (spec-ios §8).** Die Header-Injektion
-/// liegt für den Chat-Tab hier und nicht in `Planer/Networking/NetworkClient.swift`,
-/// weil `NetworkClient.send` die Antwort vollständig puffert (`data(for:)`) und
-/// damit keinen `text/event-stream` liefern kann. `Planer/Networking/` gehört I2
-/// und bleibt in I3 unberührt. Der Reviewer muss diese Doppelstelle kennen.
-enum HermesAuthorization {
-    static func request(
-        url: URL,
-        method: String,
-        accept: String,
-        configuration: ServiceConfiguration
-    ) -> URLRequest {
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.setValue(accept, forHTTPHeaderField: "Accept")
-        if let clientID = configuration.cloudflareClientID,
-           let clientSecret = configuration.cloudflareClientSecret {
-            request.setValue(clientID, forHTTPHeaderField: "CF-Access-Client-Id")
-            request.setValue(clientSecret, forHTTPHeaderField: "CF-Access-Client-Secret")
-        }
-        if let token = configuration.apiToken {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        return request
-    }
-}
-
 /// Gemeinsame HTTP-Helfer des Chat-Features.
 ///
-/// Zweck: Endpunkt zusammensetzen, Antwortströme begrenzt lesen, `Retry-After`
-/// lesen — einmal statt in Client und Anbieter doppelt.
-/// Grenze: keine Authentifizierung (das macht `HermesAuthorization`) und keine
-/// Fehlertexte (die entstehen in `APIError`/`MCPError`).
+/// Zweck: Antwortströme begrenzt lesen und SSE-Antworten erkennen — einmal statt
+/// in Client und Anbieter doppelt.
+/// Grenze: **keine Authentifizierung, kein Request-Aufbau.** Header setzt
+/// ausschließlich `NetworkClient.injectHeaders` (spec-ios §8-1); beide Chat-Pfade
+/// beziehen ihren Request deshalb über `NetworkClient.stream`.
 enum HermesHTTP {
-    /// Hängt `path` an die Basis-URL, ohne doppelte Pfadtrenner.
-    static func endpointURL(base: URL, path: String) throws -> URL {
-        guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
-            throw APIError.invalidRequest("Basis-URL nicht zerlegbar.")
-        }
-        var basePath = components.path
-        while basePath.hasSuffix("/") {
-            basePath.removeLast()
-        }
-        let normalized = path.hasPrefix("/") ? path : "/" + path
-        if basePath.hasSuffix(normalized) {
-            components.path = basePath
-        } else {
-            components.path = basePath + normalized
-        }
-        guard let url = components.url else {
-            throw APIError.invalidRequest("URL nicht baubar.")
-        }
-        return url
-    }
-
     /// Liest höchstens `limit` Bytes aus einem Antwortstrom.
     static func collect(_ bytes: URLSession.AsyncBytes, limit: Int) async throws -> Data {
         var data = Data()
@@ -432,24 +407,6 @@ enum HermesHTTP {
             }
         }
         return data
-    }
-
-    /// `Retry-After` als Sekunden oder HTTP-Datum (spec-ios §10).
-    static func retryAfter(_ response: HTTPURLResponse) -> TimeInterval? {
-        guard let raw = response.value(forHTTPHeaderField: "Retry-After") else {
-            return nil
-        }
-        if let seconds = TimeInterval(raw) {
-            return max(0, seconds)
-        }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        guard let date = formatter.date(from: raw) else {
-            return nil
-        }
-        return max(0, date.timeIntervalSinceNow)
     }
 
     /// Ist die Antwort ein SSE-Strom?
@@ -500,8 +457,9 @@ actor MCPClient {
     }
 
     private let service: ServiceType
-    private let urlSession: URLSession
-    private let keychain: KeychainManager
+    /// Einziger Transportweg: derselbe `NetworkClient` wie alle anderen Dienste,
+    /// daher genau eine Header-Injektion (spec-ios §8-1).
+    private let networkClient: NetworkClient
     private let settings: Configuration
 
     private var mcpSession = MCPSession()
@@ -515,9 +473,12 @@ actor MCPClient {
         settings: Configuration = Configuration()
     ) {
         self.service = service
-        self.urlSession = urlSession
-        self.keychain = keychain
         self.settings = settings
+        self.networkClient = NetworkClient(
+            session: urlSession,
+            timeout: settings.requestTimeout,
+            keychain: keychain
+        )
     }
 
     // MARK: Öffentliche API
@@ -583,6 +544,11 @@ actor MCPClient {
     /// **Nicht wiederholbar:** ein `tools/call` kann schreiben. Nach einer
     /// abgelaufenen Sitzung wird der Aufruf deshalb **nicht** automatisch
     /// erneut gesendet — die Oberfläche fragt, ob der Nutzer ihn wiederholen will.
+    ///
+    /// **Nicht bestätigt:** diese Methode führt aus, was ihr übergeben wird. Ob
+    /// ein schreibendes Werkzeug überhaupt hier ankommt, entscheidet
+    /// `ChatViewModel` über `ToolCallPolicy` und die Action-Chips — der Client
+    /// kennt die Oberfläche nicht und darf keine Freigabe erfinden.
     func callTool(name: String, arguments: JSONValue) async throws -> MCPToolResult {
         let toolName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !toolName.isEmpty else {
@@ -622,17 +588,12 @@ actor MCPClient {
         guard let identifier else { return }
 
         do {
-            let configuration = try loadConfiguration()
-            let url = try endpointURL(base: configuration.baseURL)
-            var request = HermesAuthorization.request(
-                url: url,
-                method: "DELETE",
-                accept: "application/json",
-                configuration: configuration
+            let request = APIRequest(
+                method: .delete,
+                path: settings.endpointPath,
+                headers: [MCPProtocol.sessionHeader: identifier]
             )
-            request.timeoutInterval = settings.requestTimeout
-            request.setValue(identifier, forHTTPHeaderField: MCPProtocol.sessionHeader)
-            _ = try await urlSession.data(for: request)
+            _ = try await networkClient.send(request, for: service)
         } catch {
             // Sitzungsende ist best effort; der lokale Zustand ist bereits geleert.
         }
@@ -695,49 +656,38 @@ actor MCPClient {
     }
 
     private func performOnce(_ request: JSONRPCRequest) async throws -> TransportResponse {
-        let configuration = try loadConfiguration()
-        let url = try endpointURL(base: configuration.baseURL)
-
-        var urlRequest = HermesAuthorization.request(
-            url: url,
-            method: "POST",
-            accept: MCPProtocol.accept,
-            configuration: configuration
-        )
-        urlRequest.timeoutInterval = settings.requestTimeout
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let identifier = mcpSession.identifier {
-            urlRequest.setValue(identifier, forHTTPHeaderField: MCPProtocol.sessionHeader)
-        }
+        let body: Data
         do {
-            urlRequest.httpBody = try Self.encoder.encode(request)
+            body = try Self.encoder.encode(request)
         } catch {
             throw MCPError.protocolViolation("Anfrage nicht serialisierbar.")
         }
 
-        let bytes: URLSession.AsyncBytes
-        let response: URLResponse
+        var headers = ["Content-Type": "application/json"]
+        if let identifier = mcpSession.identifier {
+            headers[MCPProtocol.sessionHeader] = identifier
+        }
+        // Der Request läuft durch `NetworkClient.stream`: derselbe Aufbau und
+        // dieselbe Header-Injektion wie bei jedem anderen Dienst (spec-ios §8-1).
+        let apiRequest = APIRequest(
+            method: .post,
+            path: settings.endpointPath,
+            body: body,
+            accept: MCPProtocol.accept,
+            headers: headers
+        )
+
+        let stream: StreamingResponse
         do {
-            (bytes, response) = try await urlSession.bytes(for: urlRequest)
-        } catch let error as URLError {
-            switch error.code {
-            case .cancelled:
-                throw MCPError.cancelled
-            case .timedOut:
-                throw MCPError.http(.timeout)
-            default:
-                throw MCPError.http(.offline)
-            }
+            stream = try await networkClient.stream(apiRequest, for: service)
+        } catch let error as APIError {
+            throw Self.mcpError(from: error)
         } catch is CancellationError {
             throw MCPError.cancelled
-        } catch {
-            // Kein `error.localizedDescription`: die kann die URL enthalten.
-            throw MCPError.http(.invalidRequest("Verbindung zu Hermes nicht möglich."))
         }
 
-        guard let http = response as? HTTPURLResponse else {
-            throw MCPError.protocolViolation("Antwort ohne HTTP-Status.")
-        }
+        let http = stream.response
+        let bytes = stream.bytes
         let sessionIdentifier = http.value(forHTTPHeaderField: MCPProtocol.sessionHeader)
 
         // 404 mit vorhandener Sitzung = Sitzung abgelaufen (spec-ios §10).
@@ -746,12 +696,12 @@ actor MCPClient {
             throw MCPError.sessionExpired
         }
         guard (200..<300).contains(http.statusCode) else {
-            let body = (try? await HermesHTTP.collect(bytes, limit: 4_096)) ?? Data()
+            let errorBody = (try? await HermesHTTP.collect(bytes, limit: 4_096)) ?? Data()
             throw MCPError.http(
                 APIError.from(
                     status: http.statusCode,
-                    body: body,
-                    retryAfter: HermesHTTP.retryAfter(http)
+                    body: errorBody,
+                    retryAfter: NetworkClient.retryAfter(from: http)
                 )
             )
         }
@@ -830,19 +780,18 @@ actor MCPClient {
         return identifier
     }
 
-    private func loadConfiguration() throws -> ServiceConfiguration {
-        do {
-            return try ServiceConfiguration.load(service, keychain: keychain)
-        } catch {
-            throw MCPError.invalidConfiguration(boundedText(error.localizedDescription))
-        }
-    }
-
-    private func endpointURL(base: URL) throws -> URL {
-        do {
-            return try HermesHTTP.endpointURL(base: base, path: settings.endpointPath)
-        } catch {
-            throw MCPError.invalidConfiguration(boundedText(error.localizedDescription))
+    /// Übersetzt Transportfehler des `NetworkClient` in die MCP-Fehlerform.
+    ///
+    /// Grenze: eine fehlende Konfiguration heißt „Hermes ist nicht verbunden“ und
+    /// wird nicht als Serverfehler ausgegeben — die Meldung bleibt ohne URL.
+    private static func mcpError(from error: APIError) -> MCPError {
+        switch error {
+        case .invalidConfiguration(let detail):
+            return .invalidConfiguration(boundedText(detail))
+        case .cancelled:
+            return .cancelled
+        default:
+            return .http(error)
         }
     }
 

@@ -17,9 +17,12 @@ enum HTTPMethod: String, Sendable {
 
 /// Ein Request relativ zur Basis-URL eines Dienstes.
 ///
-/// Zweck: Methode, Pfad, Query und optionaler JSON-Body als Wertetyp.
-/// Grenze: enthält bewusst keine Header; Authentifizierungs-Header setzt
-/// ausschließlich `NetworkClient.injectHeaders`.
+/// Zweck: Methode, Pfad, Query, optionaler JSON-Body und Protokoll-Header als
+/// Wertetyp.
+/// Grenze: **keine Authentifizierungs-Header.** `CF-Access-Client-Id/-Secret`
+/// und `Authorization` setzt ausschließlich `NetworkClient.injectHeaders`;
+/// `headers` ist für Protokoll-Header wie `Mcp-Session-Id` oder `Content-Type`
+/// gedacht und wird von `injectHeaders` bei Namensgleichheit überschrieben.
 struct APIRequest {
     let method: HTTPMethod
     /// Pfad relativ zur Basis-URL, z. B. `/tasks` bei Basis-URL `https://host/api`.
@@ -27,28 +30,45 @@ struct APIRequest {
     let query: [URLQueryItem]
     let body: Data?
     let accept: String
+    /// Zusätzliche Protokoll-Header; niemals Secrets (siehe Typ-Doku).
+    var headers: [String: String]
 
     init(
         method: HTTPMethod,
         path: String,
         query: [URLQueryItem] = [],
         body: Data? = nil,
-        accept: String = "application/json"
+        accept: String = "application/json",
+        headers: [String: String] = [:]
     ) {
         self.method = method
         self.path = path
         self.query = query
         self.body = body
         self.accept = accept
+        self.headers = headers
     }
+}
+
+/// Antwort eines Streaming-Requests: ungepufferter Byte-Strom plus HTTP-Kopf.
+///
+/// Zweck: `text/event-stream` (MCP, Chat) aus derselben Request-Kette lesen,
+/// die auch `send` nutzt — inklusive der einen Header-Injektion.
+/// Grenze: kein Retry und keine Statusprüfung; beides entscheidet der Aufrufer,
+/// weil ein Fehlertext im Strom stehen kann.
+struct StreamingResponse {
+    let bytes: URLSession.AsyncBytes
+    let response: HTTPURLResponse
 }
 
 /// Führt Requests gegen die vier Dienste aus.
 ///
 /// Zweck: Basis-URL aus der Keychain auflösen, Header genau einmal injizieren,
 /// Timeout/Retry nach `RetryPolicy` anwenden und Antworten in `APIError` bzw.
-/// Decodable-Werte übersetzen.
-/// Grenze: keine Fachlogik, kein Cache und kein MCP-Streaming (das ist I3).
+/// Decodable-Werte übersetzen. `stream` liefert denselben Request-Aufbau
+/// ungepuffert, damit auch `text/event-stream` (MCP, Chat) durch diese eine
+/// Header-Injektion läuft.
+/// Grenze: keine Fachlogik und kein Cache.
 struct NetworkClient {
     private let session: URLSession
     private let retryPolicy: RetryPolicy
@@ -97,6 +117,49 @@ struct NetworkClient {
         }
     }
 
+    /// Führt den Request aus und liefert den ungepufferten Antwortstrom.
+    ///
+    /// Zweck: `text/event-stream` lesen zu können, ohne die sicherheitsrelevante
+    /// Header-Injektion ein zweites Mal zu implementieren. Der Request wird über
+    /// dieselbe `makeURLRequest`/`injectHeaders`-Kette gebaut wie bei `send`.
+    /// Grenze: **kein automatischer Retry** — ein Strom wird nicht wiederholt;
+    /// die aufrufende Schicht entscheidet. Nicht-2xx-Antworten werden nicht
+    /// geworfen, weil der Fehlertext im Strom stehen kann: der Aufrufer prüft
+    /// `response.statusCode` und liest den Body begrenzt.
+    func stream(_ request: APIRequest, for service: ServiceType) async throws -> StreamingResponse {
+        let configuration: ServiceConfiguration
+        do {
+            configuration = try ServiceConfiguration.load(service, keychain: keychain)
+        } catch {
+            throw APIError.invalidConfiguration(error.localizedDescription)
+        }
+        let urlRequest = try makeURLRequest(request, configuration: configuration)
+
+        do {
+            let (bytes, response) = try await session.bytes(for: urlRequest)
+            guard let http = response as? HTTPURLResponse else {
+                throw APIError.invalidResponse
+            }
+            return StreamingResponse(bytes: bytes, response: http)
+        } catch let error as URLError {
+            switch error.code {
+            case .cancelled:
+                throw APIError.cancelled
+            case .timedOut:
+                throw APIError.timeout
+            default:
+                throw APIError.offline
+            }
+        } catch is CancellationError {
+            throw APIError.cancelled
+        } catch let error as APIError {
+            throw error
+        } catch {
+            // Kein `error.localizedDescription`: die kann die URL enthalten.
+            throw APIError.invalidRequest("Verbindung zum Dienst nicht möglich.")
+        }
+    }
+
     // MARK: - Request-Aufbau
 
     private func makeURLRequest(
@@ -118,7 +181,9 @@ struct NetworkClient {
             components.path = basePath.isEmpty ? "/" : basePath
         } else {
             let requestPath = request.path.hasPrefix("/") ? request.path : "/" + request.path
-            components.path = basePath + requestPath
+            // Eine Basis-URL, die den Endpunktpfad bereits enthält (z. B.
+            // `https://host/mcp` + `/mcp`), wird nicht verdoppelt.
+            components.path = basePath.hasSuffix(requestPath) ? basePath : basePath + requestPath
         }
         if !request.query.isEmpty {
             components.queryItems = (components.queryItems ?? []) + request.query
@@ -134,6 +199,11 @@ struct NetworkClient {
         if let body = request.body {
             urlRequest.httpBody = body
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        // Protokoll-Header zuerst; `injectHeaders` hat das letzte Wort über
+        // `Accept`, `Authorization` und die Cloudflare-Header.
+        for (field, value) in request.headers {
+            urlRequest.setValue(value, forHTTPHeaderField: field)
         }
         injectHeaders(into: &urlRequest, accept: request.accept, configuration: configuration)
         return urlRequest
@@ -220,7 +290,10 @@ struct NetworkClient {
     }
 
     /// Liest `Retry-After` als Sekunden oder als HTTP-Datum (spec-ios §10).
-    private static func retryAfter(from response: HTTPURLResponse) -> TimeInterval? {
+    ///
+    /// Intern, aber bewusst nicht `private`: `MCPClient` und der Chat-Strom
+    /// prüfen denselben Header auf Antworten, die sie über `stream` erhalten.
+    static func retryAfter(from response: HTTPURLResponse) -> TimeInterval? {
         guard let raw = response.value(forHTTPHeaderField: "Retry-After") else {
             return nil
         }

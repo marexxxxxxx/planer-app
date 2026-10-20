@@ -13,10 +13,13 @@ import Foundation
 /// angeforderte Werkzeuge über `tools/call` aus.
 ///
 /// Zweck: die Oberfläche bleibt dumm (`ChatView` rendert nur `entries`); alle
-/// Zustandsübergänge — Verbindung, Ablauf, Abbruch, Fehler — passieren hier.
+/// Zustandsübergänge — Verbindung, Ablauf, Abbruch, Freigabe, Fehler — passieren
+/// hier.
 /// Grenze: kein HTTP und keine Header (das macht `MCPClient`) und kein
-/// Streaming-Dialekt (das macht `ChatStreamProvider`). Die Klasse ist
-/// `@MainActor`, weil sie direkt SwiftUI-Zustand hält.
+/// Streaming-Dialekt (das macht `ChatStreamProvider`). **Werkzeugaufrufe sind
+/// default-deny:** ohne `readOnlyHint` wartet der Lauf auf `approveToolCall`
+/// bzw. `declineToolCall` (Action-Chips). Die Klasse ist `@MainActor`, weil sie
+/// direkt SwiftUI-Zustand hält.
 @MainActor
 final class ChatViewModel: ObservableObject {
 
@@ -43,19 +46,23 @@ final class ChatViewModel: ObservableObject {
         var toolName: String?
         /// Nur bei `kind == .tool`.
         var toolStatus: ToolCallBadge.Status?
+        /// Nur bei `kind == .tool`: der Aufruf wartet auf die Action-Chips.
+        var awaitsConfirmation: Bool
 
         init(
             id: UUID = UUID(),
             kind: Kind,
             text: String,
             toolName: String? = nil,
-            toolStatus: ToolCallBadge.Status? = nil
+            toolStatus: ToolCallBadge.Status? = nil,
+            awaitsConfirmation: Bool = false
         ) {
             self.id = id
             self.kind = kind
             self.text = text
             self.toolName = toolName
             self.toolStatus = toolStatus
+            self.awaitsConfirmation = awaitsConfirmation
         }
     }
 
@@ -81,6 +88,9 @@ final class ChatViewModel: ObservableObject {
     private var tools: [MCPTool] = []
     private var turns: [ChatTurn] = []
     private var streamTask: Task<Void, Never>?
+    /// Offene Action-Chips je Werkzeug-Eintrag. Der Lauf wartet hier, bis der
+    /// Nutzer freigibt oder ablehnt — ohne Antwort wird nichts gesendet.
+    private var pendingConfirmations: [UUID: CheckedContinuation<Bool, Never>] = [:]
 
     /// Der Anbieter ist injizierbar: ein anderer Streaming-Dialekt ist ein
     /// anderer `ChatStreamProvider`, keine Änderung an dieser Klasse.
@@ -133,6 +143,7 @@ final class ChatViewModel: ObservableObject {
     /// Beendet die Sitzung (HTTP-`DELETE` mit `Mcp-Session-Id`) und bricht einen
     /// laufenden Strom ab. Der lokale Zustand zeigt danach „nicht verbunden“.
     func disconnect() {
+        resolvePendingConfirmations(approved: false, text: "Verbindung getrennt — nicht ausgeführt.")
         streamTask?.cancel()
         streamTask = nil
         if isConnected {
@@ -165,6 +176,7 @@ final class ChatViewModel: ObservableObject {
     /// Bricht die laufende Antwort ab (spec-ios §10: jeder lange Vorgang ist
     /// abbrechbar). Ein Abbruch ist kein Fehler und kein Erfolg.
     func cancel() {
+        resolvePendingConfirmations(approved: false, text: "Abgebrochen — nicht ausgeführt.")
         streamTask?.cancel()
     }
 
@@ -172,8 +184,36 @@ final class ChatViewModel: ObservableObject {
         notice = nil
     }
 
+    // MARK: Werkzeug-Freigabe
+
+    /// Gibt einen wartenden Werkzeugaufruf frei (Action-Chip „Ausführen“).
+    ///
+    /// Grenze: wirkt nur auf einen Eintrag, der tatsächlich wartet; ein zweiter
+    /// Tipp hat keine Wirkung und löst keinen zweiten Aufruf aus.
+    func approveToolCall(_ entryID: UUID) {
+        guard let continuation = pendingConfirmations.removeValue(forKey: entryID) else { return }
+        if let index = entries.firstIndex(where: { $0.id == entryID }) {
+            entries[index].awaitsConfirmation = false
+            entries[index].toolStatus = .running
+            entries[index].text = ""
+        }
+        continuation.resume(returning: true)
+    }
+
+    /// Lehnt einen wartenden Werkzeugaufruf ab (Action-Chip „Ablehnen“).
+    ///
+    /// Der Aufruf erreicht den Server nie; das Modell erhält stattdessen einen
+    /// Werkzeug-Turn mit der Ablehnung, damit es nicht stillschweigend von einer
+    /// Ausführung ausgeht.
+    func declineToolCall(_ entryID: UUID) {
+        guard let continuation = pendingConfirmations.removeValue(forKey: entryID) else { return }
+        markDeclined(entryID, text: "Vom Nutzer abgelehnt — nicht ausgeführt.")
+        continuation.resume(returning: false)
+    }
+
     /// Löscht Verlauf und Historie; die Verbindung bleibt bestehen.
     func clear() {
+        resolvePendingConfirmations(approved: false, text: "Verlauf gelöscht — nicht ausgeführt.")
         streamTask?.cancel()
         streamTask = nil
         entries.removeAll()
@@ -215,7 +255,22 @@ final class ChatViewModel: ObservableObject {
 
                 for request in outcome.toolRequests {
                     try Task.checkCancellation()
-                    await execute(request, badgeID: outcome.badgeIDs[request.index])
+                    let badgeID = outcome.badgeIDs[request.index]
+                        ?? appendConfirmationEntry(for: request)
+
+                    // Default deny: ohne ausdrückliche `readOnlyHint` wartet der
+                    // Aufruf auf die Action-Chips. Erst „Ausführen“ sendet.
+                    if ToolCallPolicy.requiresConfirmation(for: tool(named: request.name)) {
+                        setAwaitingConfirmation(badgeID)
+                        let approved = await waitForDecision(on: badgeID)
+                        try Task.checkCancellation()
+                        guard approved else {
+                            recordDecline(request, badgeID: badgeID)
+                            continue
+                        }
+                    }
+
+                    await execute(request, badgeID: badgeID)
                 }
             }
         } catch {
@@ -295,10 +350,83 @@ final class ChatViewModel: ObservableObject {
         )
     }
 
+    // MARK: Freigabe-Hilfen
+
+    private func tool(named name: String) -> MCPTool? {
+        tools.first { $0.name == name }
+    }
+
+    /// Legt einen Eintrag an, falls der Anbieter kein `toolCallStarted` geliefert
+    /// hat. Die Freigabe braucht immer eine sichtbare Zeile mit Chips.
+    private func appendConfirmationEntry(for request: ToolCallRequest) -> UUID {
+        let entry = Entry(
+            kind: .tool,
+            text: "",
+            toolName: request.name,
+            toolStatus: .awaitingConfirmation,
+            awaitsConfirmation: true
+        )
+        entries.append(entry)
+        return entry.id
+    }
+
+    private func setAwaitingConfirmation(_ entryID: UUID) {
+        guard let index = entries.firstIndex(where: { $0.id == entryID }) else { return }
+        entries[index].awaitsConfirmation = true
+        entries[index].toolStatus = .awaitingConfirmation
+        entries[index].text = ""
+    }
+
+    /// Hält den Lauf an, bis der Nutzer einen Chip tippt oder der Lauf endet.
+    private func waitForDecision(on entryID: UUID) async -> Bool {
+        await withCheckedContinuation { continuation in
+            pendingConfirmations[entryID] = continuation
+        }
+    }
+
+    /// Löst alle offenen Chips auf (Abbruch, Trennen, Verlauf löschen), damit
+    /// kein Aufruf ohne Antwort hängen bleibt.
+    private func resolvePendingConfirmations(approved: Bool, text: String) {
+        let pending = pendingConfirmations
+        pendingConfirmations.removeAll()
+        for (entryID, continuation) in pending {
+            if !approved {
+                markDeclined(entryID, text: text)
+            }
+            continuation.resume(returning: approved)
+        }
+    }
+
+    private func markDeclined(_ entryID: UUID, text: String) {
+        guard let index = entries.firstIndex(where: { $0.id == entryID }) else { return }
+        entries[index].awaitsConfirmation = false
+        entries[index].toolStatus = .declined
+        entries[index].text = text
+    }
+
+    /// Meldet die Ablehnung als Werkzeug-Ergebnis an das Modell — nicht als
+    /// Erfolg und nicht als Fehler des Servers.
+    private func recordDecline(_ request: ToolCallRequest, badgeID: UUID?) {
+        let text = "Vom Nutzer abgelehnt — nicht ausgeführt."
+        if let badgeID {
+            markDeclined(badgeID, text: text)
+        }
+        turns.append(
+            ChatTurn(
+                role: .tool,
+                content: text,
+                toolCallID: request.id,
+                toolName: request.name
+            )
+        )
+    }
+
     /// Führt einen angeforderten Werkzeugaufruf aus (`tools/call`).
     ///
     /// Grenze: ein Fehler wird als Werkzeug-Ergebnis an das Modell und als
     /// Badge an die Oberfläche gegeben — kein Absturz, kein stiller Erfolg.
+    /// Der Aufruf kommt nur hier an, wenn `ToolCallPolicy` ihn freigegeben hat
+    /// oder der Nutzer „Ausführen“ getippt hat.
     private func execute(_ request: ToolCallRequest, badgeID: UUID?) async {
         do {
             let arguments = try parseArguments(request.argumentsJSON)

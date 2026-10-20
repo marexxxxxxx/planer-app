@@ -19,35 +19,47 @@ struct ToolCallBadge: View {
 
     /// Zustand eines Werkzeugaufrufs.
     enum Status: Equatable, Sendable {
+        /// Noch nicht freigegeben; der Aufruf hat den Server nicht erreicht.
+        case awaitingConfirmation
         case running
         case succeeded
         case failed
+        /// Der Nutzer hat den Aufruf abgelehnt oder abgebrochen.
+        case declined
 
         var label: String {
             switch self {
+            case .awaitingConfirmation:
+                return "wartet auf Freigabe"
             case .running:
                 return "läuft"
             case .succeeded:
                 return "fertig"
             case .failed:
                 return "Fehler"
+            case .declined:
+                return "nicht ausgeführt"
             }
         }
 
         var systemImage: String {
             switch self {
+            case .awaitingConfirmation:
+                return "hand.raised"
             case .running:
                 return "hourglass"
             case .succeeded:
                 return "checkmark.circle"
             case .failed:
                 return "exclamationmark.triangle"
+            case .declined:
+                return "xmark.circle"
             }
         }
 
         var tint: Color {
             switch self {
-            case .running:
+            case .awaitingConfirmation, .running, .declined:
                 return DesignTokens.Palette.secondaryLabel
             case .succeeded:
                 return DesignTokens.Palette.success

@@ -179,54 +179,42 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
         tools: [MCPTool],
         continuation: AsyncThrowingStream<ChatStreamEvent, Error>.Continuation
     ) async throws {
-        let configuration: ServiceConfiguration
-        do {
-            configuration = try ServiceConfiguration.load(.hermes, keychain: keychain)
-        } catch {
-            throw ChatStreamError.http(.invalidConfiguration(error.localizedDescription))
-        }
-
-        let url = try HermesHTTP.endpointURL(base: configuration.baseURL, path: settings.endpointPath)
-        var request = HermesAuthorization.request(
-            url: url,
-            method: "POST",
-            accept: MCPProtocol.eventStreamContentType + ", application/json",
-            configuration: configuration
+        // Request und Header kommen aus dem `NetworkClient` — dieselbe Kette wie
+        // jeder andere Dienst und damit genau eine Header-Injektion (spec-ios §8-1).
+        let networkClient = NetworkClient(
+            session: urlSession,
+            timeout: settings.streamTimeout,
+            keychain: keychain
         )
-        request.timeoutInterval = settings.streamTimeout
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encodeBody(messages: messages, tools: tools)
+        let request = APIRequest(
+            method: .post,
+            path: settings.endpointPath,
+            body: try encodeBody(messages: messages, tools: tools),
+            accept: MCPProtocol.eventStreamContentType + ", application/json",
+            headers: ["Content-Type": "application/json"]
+        )
 
-        let bytes: URLSession.AsyncBytes
-        let response: URLResponse
+        let stream: StreamingResponse
         do {
-            (bytes, response) = try await urlSession.bytes(for: request)
-        } catch let error as URLError {
-            switch error.code {
-            case .cancelled:
+            stream = try await networkClient.stream(request, for: .hermes)
+        } catch let error as APIError {
+            if error == .cancelled {
                 throw ChatStreamError.cancelled
-            case .timedOut:
-                throw ChatStreamError.http(.timeout)
-            default:
-                throw ChatStreamError.http(.offline)
             }
+            throw ChatStreamError.http(error)
         } catch is CancellationError {
             throw ChatStreamError.cancelled
-        } catch {
-            // Kein `error.localizedDescription`: die kann die URL enthalten.
-            throw ChatStreamError.http(.invalidRequest("Verbindung zum Chat-Endpunkt nicht möglich."))
         }
 
-        guard let http = response as? HTTPURLResponse else {
-            throw ChatStreamError.protocolViolation("Antwort ohne HTTP-Status.")
-        }
+        let http = stream.response
+        let bytes = stream.bytes
         guard (200..<300).contains(http.statusCode) else {
             let body = (try? await HermesHTTP.collect(bytes, limit: 4_096)) ?? Data()
             throw ChatStreamError.http(
                 APIError.from(
                     status: http.statusCode,
                     body: body,
-                    retryAfter: HermesHTTP.retryAfter(http)
+                    retryAfter: NetworkClient.retryAfter(from: http)
                 )
             )
         }

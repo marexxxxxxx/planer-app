@@ -171,11 +171,23 @@ struct ChatView: View {
         case .agent:
             MessageBubbleView(role: .agent, text: entry.text)
         case .tool:
-            ToolCallBadge(
-                name: entry.toolName ?? "Werkzeug",
-                status: entry.toolStatus ?? .running,
-                detail: entry.text.isEmpty ? nil : entry.text
-            )
+            VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
+                ToolCallBadge(
+                    name: entry.toolName ?? "Werkzeug",
+                    status: entry.toolStatus ?? .running,
+                    detail: entry.text.isEmpty ? nil : entry.text
+                )
+
+                // Design-Spec §4/Tab 1: schreibende Aufrufe werden erst nach
+                // einem Tipp auf „Ausführen“ an Hermes gesendet.
+                if entry.awaitsConfirmation {
+                    ToolConfirmationChips(
+                        toolName: entry.toolName ?? "Werkzeug",
+                        onApprove: { viewModel.approveToolCall(entry.id) },
+                        onDecline: { viewModel.declineToolCall(entry.id) }
+                    )
+                }
+            }
         }
     }
 
