@@ -2,24 +2,26 @@
 //  ChatView.swift
 //  Planer
 //
-//  Tab 1 „Chat“: Verlauf, Eingabe, Werkzeugaufrufe — Oberfläche über
-//  `ChatViewModel` (spec-ios §1/I3).
+//  Tab 1 „Chat“: Verlauf, Eingabe, Denken, Werkzeugkarten und Freigaben —
+//  Oberfläche über `ChatViewModel` (spec-chat Rev 4 §4, §6.3, §9.3).
 //
 
 import SwiftUI
 
-/// Chat-Tab mit nativem MCP-Client.
+/// Chat-Tab.
 ///
-/// Zweck: zeigt den Verlauf als Blasen, Werkzeugaufrufe als Badge und macht
-/// Verbindungszustand, Abbruch und Fehler sichtbar.
-/// Grenze: kein Netzwerk und keine Fachlogik — beides liegt im `ChatViewModel`;
-/// die View rendert nur dessen Zustand. Die konkrete Streaming-Anbindung ist
-/// eine `[ANNAHME]` im `ChatStreamProvider`, nicht hier.
+/// Zweck: rendert ausschließlich den Zustand aus `ChatViewModel` — Verlauf,
+/// Denk-Klappen, Werkzeugkarten, Freigabe-Chips, Statuszeile und Eingabe.
+/// Grenze: keine Fachlogik und kein Netzwerk. Die View liest die öffentliche
+/// API (§9.3) und ruft nur deren Methoden; Laden, Senden, Abbruch, Freigabe
+/// und Merge liegen im ViewModel. Einen MCP-Lebenszyklus gibt es nicht mehr —
+/// deshalb kein `connect()`/`disconnect()`.
 struct ChatView: View {
 
     @StateObject private var viewModel = ChatViewModel()
     @EnvironmentObject private var voice: VoiceCoordinator
     @FocusState private var isInputFocused: Bool
+    @State private var showsSessions = false
 
     /// Anker für das automatische Scrollen ans Ende.
     private let bottomAnchor = "chat-bottom"
@@ -40,84 +42,93 @@ struct ChatView: View {
             .navigationTitle("Chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    optionsMenu
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        viewModel.newChat()
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .disabled(viewModel.isStreaming)
+                    .accessibilityLabel("Neuer Chat")
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showsSessions = true
+                        Task { await viewModel.loadSessions() }
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                    }
+                    .accessibilityLabel("Verlauf")
+                }
+            }
+            .sheet(isPresented: $showsSessions) {
+                SessionListView(
+                    sessions: viewModel.sessions,
+                    isLoading: viewModel.isLoadingSessions,
+                    loadedAll: viewModel.loadedAllSessions,
+                    isStreaming: viewModel.isStreaming,
+                    selectedSessionID: viewModel.currentSession?.id,
+                    errorText: viewModel.sessions.isEmpty ? viewModel.notice : nil,
+                    onSelect: { session in
+                        showsSessions = false
+                        Task { await viewModel.openSession(session) }
+                    },
+                    onNewChat: {
+                        showsSessions = false
+                        viewModel.newChat()
+                    },
+                    onLoadMore: {
+                        Task { await viewModel.loadMoreSessions() }
+                    },
+                    onRetry: {
+                        Task { await viewModel.loadSessions() }
+                    }
+                )
             }
             .task { @MainActor in
                 // N1: `@StateObject` erlaubt keinen Environment-Zugriff im
-                // Initializer — die Verdrahtung passiert hier, vor `connect()`.
-                // `View.task` nimmt ein `@Sendable`-Closure; die beiden
-                // MainActor-Zugriffe unten brauchen deshalb die ausdrückliche
-                // Isolierung (wie TodosView.swift, begründet in GrocyView.swift).
+                // Initializer — die Verdrahtung passiert hier. Ein
+                // MCP-Lebenszyklus existiert nicht mehr (Befund 10).
                 viewModel.voice = voice
                 voice.onTranscript = { [weak viewModel] text in
                     viewModel?.appendDictation(text)
                 }
-                await viewModel.connect()
             }
             .onDisappear {
-                viewModel.disconnect()
+                viewModel.detach()
             }
         }
     }
 
-    // MARK: Status
+    // MARK: Status (§4.9)
 
     private var statusBar: some View {
         HStack(spacing: DesignTokens.Spacing.xs) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-
-            Text(viewModel.statusText)
+            Text(statusText)
                 .font(DesignTokens.Typography.footnote)
                 .foregroundStyle(DesignTokens.Palette.secondaryLabel)
                 .lineLimit(1)
-                .accessibilityLabel(Text("Verbindungsstatus: \(viewModel.statusText)"))
 
             Spacer(minLength: DesignTokens.Spacing.s)
-
-            if case .failed = viewModel.connection {
-                Button("Erneut verbinden") {
-                    Task { await viewModel.connect() }
-                }
-                .font(DesignTokens.Typography.footnote)
-            }
         }
         .padding(.horizontal, DesignTokens.Spacing.l)
         .padding(.vertical, DesignTokens.Spacing.xs)
         .background(DesignTokens.Palette.groupedBackground)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("Status: \(statusText)"))
     }
 
-    private var statusColor: Color {
-        switch viewModel.connection {
-        case .idle:
-            return DesignTokens.Palette.secondaryLabel
-        case .connecting:
-            return DesignTokens.Palette.secondaryLabel
-        case .ready:
-            return DesignTokens.Palette.success
-        case .failed:
-            return DesignTokens.Palette.danger
+    private var statusText: String {
+        if viewModel.isLoadingSessions {
+            return "Lade Verlauf …"
         }
-    }
-
-    private var optionsMenu: some View {
-        Menu {
-            Button("Verlauf löschen", systemImage: "trash") {
-                viewModel.clear()
-            }
-            .disabled(viewModel.entries.isEmpty)
-
-            Button("Verbindung trennen", systemImage: "bolt.slash") {
-                viewModel.disconnect()
-            }
-            .disabled(!viewModel.isConnected)
-        } label: {
-            Image(systemName: "ellipsis.circle")
+        if let statusNote = viewModel.statusNote {
+            return statusNote.text
         }
-        .accessibilityLabel("Chat-Optionen")
+        if let session = viewModel.currentSession {
+            return SessionListView.displayTitle(for: session)
+        }
+        return "Neue Unterhaltung"
     }
 
     private func noticeBar(_ notice: String) -> some View {
@@ -151,13 +162,27 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
+                    if viewModel.hasMoreOlder {
+                        Button {
+                            Task { await viewModel.loadOlderMessages() }
+                        } label: {
+                            Text(viewModel.isLoadingHistory ? "Lade ältere Nachrichten …" : "Ältere laden")
+                                .font(DesignTokens.Typography.footnote)
+                        }
+                        .disabled(viewModel.isLoadingHistory)
+                        .frame(maxWidth: .infinity)
+                        .accessibilityLabel("Ältere Nachrichten laden")
+                    }
+
                     if viewModel.entries.isEmpty {
                         emptyState
                     }
+
                     ForEach(viewModel.entries) { entry in
                         row(for: entry)
                             .id(entry.id)
                     }
+
                     Color.clear
                         .frame(height: 1)
                         .id(bottomAnchor)
@@ -165,10 +190,7 @@ struct ChatView: View {
                 .padding(DesignTokens.Spacing.l)
             }
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: viewModel.entries.count) { _, _ in
-                scrollToBottom(proxy)
-            }
-            .onChange(of: viewModel.entries.last?.text) { _, _ in
+            .onChange(of: viewModel.entries.last?.id) { _, _ in
                 scrollToBottom(proxy)
             }
         }
@@ -179,58 +201,143 @@ struct ChatView: View {
         switch entry.kind {
         case .user:
             MessageBubbleView(role: .user, text: entry.text)
+
         case .agent:
             VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
-                MessageBubbleView(role: .agent, text: entry.text)
+                // §4.5: leerer Text mit Reasoning rendert keine leere Bubble.
+                if !entry.text.isEmpty {
+                    MessageBubbleView(role: .agent, text: entry.text)
 
-                // §7: jede Antwort trägt ihre Herkunft — kein stiller Wechsel.
-                if let engine = entry.engine {
-                    Text(engine.title)
-                        .font(DesignTokens.Typography.footnote)
-                        .foregroundStyle(DesignTokens.Palette.secondaryLabel)
-                        .accessibilityLabel(Text("Antwort von \(engine.title)"))
+                    // §7 (spec-voice): jede Antwort trägt ihre Herkunft.
+                    if let engine = entry.engine {
+                        Text(engine.title)
+                            .font(DesignTokens.Typography.footnote)
+                            .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                            .accessibilityLabel(Text("Antwort von \(engine.title)"))
+                    }
                 }
-            }
-        case .tool:
-            VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
-                ToolCallBadge(
-                    name: entry.toolName ?? "Werkzeug",
-                    status: entry.toolStatus ?? .running,
-                    detail: entry.text.isEmpty ? nil : entry.text
-                )
 
-                // Design-Spec §4/Tab 1: schreibende Aufrufe werden erst nach
-                // einem Tipp auf „Ausführen“ an Hermes gesendet.
-                if entry.awaitsConfirmation {
-                    ToolConfirmationChips(
-                        toolName: entry.toolName ?? "Werkzeug",
-                        onApprove: { viewModel.approveToolCall(entry.id) },
-                        onDecline: { viewModel.declineToolCall(entry.id) }
+                if let reasoning = entry.reasoning, !reasoning.isEmpty {
+                    ThinkingDisclosureView(
+                        text: reasoning,
+                        isExpanded: entry.reasoningDisclosure == .expanded,
+                        onToggle: {
+                            viewModel.toggleReasoning(entry.id)
+                        }
                     )
                 }
             }
+
+        case .tool:
+            ToolCallCard(
+                name: entry.toolName ?? "Werkzeug",
+                status: entry.toolStatus ?? .running,
+                argumentsText: entry.toolArgs,
+                resultText: entry.toolResult,
+                isExpanded: entry.toolDetailDisclosure == .expanded,
+                onToggle: {
+                    viewModel.toggleToolDetail(entry.id)
+                }
+            )
+
+        case .approval:
+            approvalCard(for: entry)
         }
+    }
+
+    private func approvalCard(for entry: ChatViewModel.Entry) -> some View {
+        VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
+            HStack(spacing: DesignTokens.Spacing.xs) {
+                Image(systemName: "hand.raised")
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+
+                Text("Freigabe")
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.label)
+
+                Spacer(minLength: DesignTokens.Spacing.xs)
+
+                Text((entry.toolStatus ?? .awaitingApproval).displayLabel)
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(
+                        (entry.toolStatus ?? .awaitingApproval).displayTint
+                    )
+            }
+
+            if let command = entry.approval?.command, !command.isEmpty {
+                Text(command)
+                    .font(DesignTokens.Typography.footnote.monospaced())
+                    .foregroundStyle(DesignTokens.Palette.label)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+            }
+
+            if !entry.text.isEmpty {
+                Text(entry.text)
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let approval = entry.approval, !entry.approvalResolved {
+                ToolConfirmationChips(
+                    approval: approval,
+                    isSending: viewModel.decidingApprovalEntryID == entry.id,
+                    onDecide: { choice in
+                        Task {
+                            await viewModel.decideApproval(entry.id, choice: choice)
+                        }
+                    }
+                )
+            }
+        }
+        .padding(DesignTokens.Spacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            DesignTokens.Palette.secondaryBackground,
+            in: RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)
+        )
+        .accessibilityElement(children: .contain)
     }
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.largeTitle)
+            if viewModel.isLoadingHistory {
+                ProgressView("Lade Verlauf …")
+            } else if let session = viewModel.currentSession {
+                Image(systemName: "text.bubble")
+                    .font(.largeTitle)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+
+                Text("Noch keine Nachrichten in dieser Unterhaltung.")
+                    .font(DesignTokens.Typography.callout)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Erneut laden") {
+                    Task { await viewModel.openSession(session) }
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Verlauf erneut laden")
+            } else {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.largeTitle)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+
+                Text("Frag Hermes")
+                    .font(DesignTokens.Typography.headline)
+
+                Text(
+                    "Der Chat spricht mit Hermes über den Server. "
+                    + "To-Dos, Einkauf und Wochenplan beantwortet Hermes über seine Werkzeuge."
+                )
+                .font(DesignTokens.Typography.callout)
                 .foregroundStyle(DesignTokens.Palette.secondaryLabel)
-
-            Text("Frag Hermes")
-                .font(DesignTokens.Typography.headline)
-
-            Text(
-                "Der Chat spricht über den nativen MCP-Client mit Hermes. "
-                + "To-Dos, Einkauf und Wochenplan beantwortet Hermes über seine Werkzeuge."
-            )
-            .font(DesignTokens.Typography.callout)
-            .foregroundStyle(DesignTokens.Palette.secondaryLabel)
-            .fixedSize(horizontal: false, vertical: true)
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.vertical, DesignTokens.Spacing.xl)
-        .accessibilityElement(children: .combine)
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
@@ -260,7 +367,7 @@ struct ChatView: View {
                 .onSubmit {
                     viewModel.send()
                 }
-                .disabled(viewModel.isStreaming)
+                .disabled(viewModel.isStreaming || viewModel.isLoadingHistory)
                 .accessibilityLabel("Nachricht an Hermes")
 
             if viewModel.isStreaming {

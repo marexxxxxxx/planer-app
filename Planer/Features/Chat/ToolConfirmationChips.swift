@@ -2,63 +2,72 @@
 //  ToolConfirmationChips.swift
 //  Planer
 //
-//  Action-Chips für einen bestätigungspflichtigen Werkzeugaufruf
-//  (Design-Spec §4/Tab 1, Review-Befund N5).
+//  Freigabe-Chips für ein `approval.request` (spec-chat Rev 4 §4.7, §4.10).
 //
 
 import SwiftUI
 
-/// Inline-Freigabe eines Werkzeugaufrufs: „Ausführen“ oder „Ablehnen“.
+/// Beantwortet eine Server-Freigabe: „Ausführen“ oder „Ablehnen“.
 ///
-/// Zweck: der Nutzer entscheidet, bevor ein schreibendes `tools/call` an Hermes
-/// geht. Der Prompt nennt das Werkzeug; ohne Tipp auf „Ausführen“ passiert
-/// nichts.
-/// Grenze: führt selbst nichts aus und kennt keine Argumente — die Zustands-
-/// übergänge liegen in `ChatViewModel`, das Ergebnis erscheint im `ToolCallBadge`.
+/// Zweck: der Server hat angehalten und bietet Choices an; die Chips zeigen
+/// **nur** die angebotenen (`once`/`deny`) und senden erst nach einem Tipp.
+/// Grenze: führt nichts aus und entscheidet nichts — der POST läuft über
+/// `ChatViewModel.decideApproval`, der auch die fail-closed-Prädikate prüft.
+/// Ohne Tipp wird nichts gesendet; während des POST sind beide Chips inaktiv.
+/// Befehl und Beschreibung zeigt die Karte, nicht dieser Baustein.
 struct ToolConfirmationChips: View {
 
-    let toolName: String
-    let onApprove: () -> Void
-    let onDecline: () -> Void
+    /// Die Freigabe mit den angebotenen Choices.
+    let approval: ChatApproval
+    /// `true`, solange der POST zu dieser Freigabe läuft.
+    let isSending: Bool
+    /// Meldet die gewählte Choice an das ViewModel.
+    let onDecide: (ChatApprovalChoice) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
-            Text("Hermes möchte „\(toolName)“ ausführen. Das kann Daten verändern.")
-                .font(DesignTokens.Typography.footnote)
-                .foregroundStyle(DesignTokens.Palette.secondaryLabel)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: DesignTokens.Spacing.s) {
-                Button("Ausführen", action: onApprove)
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityLabel(
-                        Text("Werkzeug \(toolName) ausführen")
-                    )
-
-                Button("Ablehnen", action: onDecline)
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel(
-                        Text("Werkzeug \(toolName) ablehnen")
-                    )
+        HStack(spacing: DesignTokens.Spacing.s) {
+            if approval.canApproveOnce {
+                Button("Ausführen") {
+                    onDecide(.once)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSending)
+                .accessibilityLabel(
+                    Text("Freigabe für \(approval.command ?? "den Befehl") ausführen")
+                )
             }
-            .font(DesignTokens.Typography.footnote)
+
+            if approval.canDeny {
+                Button("Ablehnen") {
+                    onDecide(.deny)
+                }
+                .buttonStyle(.bordered)
+                .disabled(isSending)
+                .accessibilityLabel(
+                    Text("Freigabe für \(approval.command ?? "den Befehl") ablehnen")
+                )
+            }
+
+            if isSending {
+                Text("Wird gesendet …")
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+            }
         }
-        .padding(.horizontal, DesignTokens.Spacing.m)
-        .padding(.vertical, DesignTokens.Spacing.s)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            DesignTokens.Palette.secondaryBackground,
-            in: RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)
-        )
-        .accessibilityElement(children: .contain)
+        .font(DesignTokens.Typography.footnote)
     }
 }
 
 #Preview("ToolConfirmationChips") {
     ToolConfirmationChips(
-        toolName: "task_create",
-        onApprove: {},
-        onDecline: {}
+        approval: ChatApproval(
+            runID: "run_123",
+            command: "hermes_tasks_create(title: \"Milch kaufen\")",
+            description: "Hermes möchte eine Aufgabe anlegen.",
+            choices: ["once", "deny", "session"]
+        ),
+        isSending: false,
+        onDecide: { _ in }
     )
     .padding()
 }

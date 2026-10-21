@@ -46,7 +46,7 @@ planer-app/
 │   │   ├── DesignTokens.swift         Farben, Abstände, Radien, Typografie
 │   │   └── Components/                MessageBubbleView, SettingsRowView, UnifiedListItemView
 │   ├── Features/
-│   │   ├── Chat/    ChatView, ChatViewModel, MCPClient, MCPSession, ToolCallPolicy
+│   │   ├── Chat/    ChatView, ChatViewModel, SessionListView, ThinkingDisclosureView, ToolCallCard, ToolConfirmationChips, ChatDTOs, ChatConfiguration, ChatSSE, HermesChatAPI, ChatStreamProvider
 │   │   ├── Todos/   TodosView, TodosViewModel, TodoRepository, TodoEditorSheet
 │   │   ├── Grocy/   GrocyView, GrocyViewModel, GrocyRepository, GrocyDTO
 │   │   └── Mealie/  MealieView, MealieViewModel, MealieRepository, MealieDTO
