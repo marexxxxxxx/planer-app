@@ -108,9 +108,13 @@ struct MealiePagination: Decodable, Equatable {
 
 /// Rohe Wochenplan-Zeile aus `GET /households/mealplans` (`ReadPlanEntry`).
 ///
-/// Nur die Felder, die die Normalform braucht. `id`, `groupId`, `userId` und
-/// `householdId` der Antwort werden bewusst nicht dekodiert.
+/// Nur die Felder, die die Normalform braucht. `groupId`, `userId` und
+/// `householdId` der Antwort werden bewusst nicht dekodiert; `id` dagegen
+/// schon: sie ist die einzige Unterscheidung zweier inhaltsgleicher Einträge
+/// (zwei echte „Reste“ am selben Tag zur selben Mahlzeit, MARAAA-140/N2).
 struct MealiePlanEntry: Decodable, Equatable {
+    /// Server-ID des Planeintrags (`ReadPlanEntry.id`, Mealie: UUID).
+    let id: String?
     let date: String
     let entryType: String?
     let recipeId: String?
@@ -121,6 +125,7 @@ struct MealiePlanEntry: Decodable, Equatable {
     let recipe: MealieRecipeSummary?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case date
         case entryType
         case recipeId
@@ -138,6 +143,7 @@ struct MealiePlanEntry: Decodable, Equatable {
     func normalize() -> MealieMealPlanItem? {
         guard let day = MealieText.nonEmpty(date) else { return nil }
         let mealType = MealieText.trimmed(entryType)
+        let entryID = MealieText.nonEmpty(id)
 
         if let recipeID = MealieText.nonEmpty(recipeId) {
             let name = MealieText.nonEmpty(recipe?.name)
@@ -147,6 +153,7 @@ struct MealiePlanEntry: Decodable, Equatable {
                 date: day,
                 mealType: mealType,
                 recipeID: recipeID,
+                entryID: entryID,
                 recipeName: name,
                 recipeScale: recipeScale ?? 1
             )
@@ -159,6 +166,7 @@ struct MealiePlanEntry: Decodable, Equatable {
             date: day,
             mealType: mealType,
             recipeID: nil,
+            entryID: entryID,
             recipeName: name,
             recipeScale: recipeScale ?? 1
         )
@@ -192,6 +200,10 @@ struct MealieMealPlanItem: Equatable, Identifiable, Sendable {
     let mealType: String
     /// `nil` bei Freitext (z. B. „Reste“) — es gibt kein Rezept zum Nachladen.
     let recipeID: String?
+    /// Server-ID des Planeintrags (`ReadPlanEntry.id`). Unterscheidet zwei
+    /// echte, inhaltsgleiche Freitext-Einträge („Reste“ am selben Tag zur
+    /// selben Mahlzeit); ohne sie kollidierten beide zu einer Zeile.
+    let entryID: String?
     let recipeName: String
     let recipeScale: Double
 
@@ -200,10 +212,14 @@ struct MealieMealPlanItem: Equatable, Identifiable, Sendable {
     var isTextEntry: Bool { recipeID == nil }
 
     /// Stabile Cache-ID. Rezeptzeilen behalten das bisherige Schema; Freitext
-    /// hat keine Rezept-ID und bekommt deshalb einen Inhalts-Hash, damit
+    /// hat keine Rezept-ID und wird über die Server-ID des Planeintrags
+    /// unterschieden. Erst ohne Server-ID greift der Inhalts-Hash, damit
     /// derselbe Eintrag bei jedem Laden dieselbe Zeile trifft.
     var id: String {
         guard let recipeID else {
+            if let entryID {
+                return Self.textPrefix + entryID
+            }
             return Self.textPrefix + Self.hashPrefix("\(date)|\(mealType)|\(recipeName)")
         }
         return "\(Self.cachePrefix)\(date):\(mealType):\(recipeID)"
@@ -313,14 +329,19 @@ struct MealieIngredient: Equatable, Sendable, Identifiable {
 ///
 /// `slug` ist nur nach einem Online-Laden bekannt; die Cache-Entity `Recipe`
 /// aus I2 hat kein Slug-Feld (spec-ios §3.3).
-/// `imageURL` ist gesetzt, wenn `id` die Mealie-Rezept-ID ist: nur dann lässt
-/// sich die Bild-Route `/media/recipes/{id}/images/original.webp` bilden. Für
-/// die Anzeige lädt `MealieImageView` die Bytes erneut über `NetworkClient`,
-/// weil `URLSession.shared` die CF-/Bearer-Header nicht kennt.
+/// `imageID` ist die Mealie-Rezept-ID, aus der die Bild-Route
+/// `/media/recipes/{id}/images/original.webp` entsteht; `nil`, wenn die Antwort
+/// nur einen Slug hatte.
+/// `imageURL` ist die mit der **aktuellen** Basis gebildete Adresse. Sie steuert
+/// nur den Neustart des Bild-Loaders: wird die Basis-URL in den Einstellungen
+/// gesetzt oder korrigiert, ändert sich der Wert (MARAAA-140/M1). Geladen wird
+/// über `MealieImageView` und `NetworkClient`, weil `URLSession.shared` die
+/// CF-/Bearer-Header nicht kennt.
 struct MealieRecipeRow: Identifiable, Equatable {
     let id: String
     let name: String
     let slug: String?
+    let imageID: String?
     let imageURL: URL?
     let totalTime: String?
     let servings: Double

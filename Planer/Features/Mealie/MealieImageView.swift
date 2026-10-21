@@ -64,8 +64,21 @@ struct MealieImageView: View {
 
     let recipeID: String
     let repository: MealieRepository
+    /// Adresse, die die Zeile mit der **damaligen** Basis gebildet hat. Sie
+    /// steuert ausschließlich den Neustart des Loaders: wird die Basis-URL in
+    /// den Einstellungen hinterlegt oder korrigiert, ändert sich der Wert und
+    /// `.task(id:)` startet den Ladeversuch erneut — ohne App-Neustart
+    /// (MARAAA-140/M1). Der Request selbst fragt die Basis im Repository und
+    /// im `NetworkClient` bei jedem Zugriff neu ab.
+    let imageURL: URL?
 
     @State private var phase: Phase = .loading
+
+    /// Identität des Ladevorgangs: Rezept-ID plus Basis, mit der die Zeile
+    /// gebaut wurde.
+    private var loadKey: String {
+        "\(recipeID)|\(imageURL?.absoluteString ?? "keine-basis")"
+    }
 
     var body: some View {
         content
@@ -75,7 +88,7 @@ struct MealieImageView: View {
                 RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)
             )
             .accessibilityHidden(true)
-            .task(id: recipeID) {
+            .task(id: loadKey) {
                 await load()
             }
     }

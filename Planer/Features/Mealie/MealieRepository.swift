@@ -34,11 +34,20 @@ final class MealieRepository {
 
     private let client: NetworkClient
     private let context: ModelContext
+    private let keychain: KeychainManager
     private let now: () -> Date
     private let calendar: Calendar
-    /// Origin der Mealie-Instanz für relative Bildpfade; `nil`, solange keine
-    /// gültige Basis-URL in der Keychain liegt (dann bleibt das Bild aus).
-    private let imageBaseURL: URL?
+
+    /// Origin der Mealie-Instanz für relative Bildpfade; wird **bei jedem
+    /// Zugriff** aus der Keychain aufgelöst (MARAAA-140/M1).
+    ///
+    /// Bewusst nicht im Init gelesen: wer eine Basis-URL erst nach dem Öffnen
+    /// des Rezepte-Tabs hinterlegt oder korrigiert, sähe sonst bis zum
+    /// App-Neustart nur Platzhalter. `nil`, solange keine gültige Basis in der
+    /// Keychain liegt (dann bleibt das Bild aus).
+    private var imageBaseURL: URL? {
+        (try? ServiceConfiguration.load(.mealie, keychain: keychain))?.baseURL
+    }
 
     init(
         client: NetworkClient = NetworkClient(),
@@ -49,9 +58,9 @@ final class MealieRepository {
     ) {
         self.client = client
         self.context = context
+        self.keychain = keychain
         self.now = now
         self.calendar = calendar
-        self.imageBaseURL = (try? ServiceConfiguration.load(.mealie, keychain: keychain))?.baseURL
     }
 
     // MARK: - Netz: Wochenplan
@@ -91,9 +100,10 @@ final class MealieRepository {
         var unique: [MealieMealPlanItem] = []
         var seen = Set<String>()
         for item in entries.compactMap({ $0.normalize() }) {
-            // Die Cache-ID ist bewusst inhaltsbasiert (Freitext hat keine
-            // Rezept-ID); identische Doppel-Einträge desselben Tages und
-            // derselben Mahlzeit dürfen keine doppelte SwiftUI-ID erzeugen.
+            // Die Cache-ID enthält bei Freitext die Server-ID, bei
+            // Rezeptzeilen Tag, Mahlzeit und Rezept-ID; nur ein echter
+            // Doppeleintrag aus der Paginierung fällt hier heraus, zwei
+            // inhaltsgleiche Freitext-Zeilen bleiben zwei Zeilen (MARAAA-140/N2).
             guard seen.insert(item.id).inserted else { continue }
             unique.append(item)
         }
@@ -171,6 +181,7 @@ final class MealieRepository {
             id: identifier,
             name: MealieText.nonEmpty(summary.name) ?? MealieText.nonEmpty(summary.slug) ?? identifier,
             slug: MealieText.nonEmpty(summary.slug),
+            imageID: recipeID,
             imageURL: recipeID.flatMap { imageURL(forRecipeID: $0) },
             totalTime: MealieText.nonEmpty(summary.totalTime),
             servings: summary.recipeServings ?? 0
@@ -261,6 +272,7 @@ final class MealieRepository {
                 date: MealieDay.text(for: date, calendar: calendar),
                 mealType: row.mealType,
                 recipeID: Self.recipeID(fromPlanCacheID: row.id),
+                entryID: Self.entryID(fromPlanCacheID: row.id),
                 recipeName: row.name,
                 recipeScale: row.recipeScale
             )
@@ -315,7 +327,12 @@ final class MealieRepository {
                 id: row.id,
                 name: row.name,
                 slug: nil,
-                imageURL: storedImageURL(row.imageURL),
+                imageID: row.id,
+                // Die gespeicherte Adresse kann mit einer inzwischen
+                // korrigierten Basis entstanden sein; fehlt sie ganz (Bibliothek
+                // ohne hinterlegte URL gecacht), wird sie hier mit der
+                // aktuellen Basis gebildet (MARAAA-140/M1).
+                imageURL: storedImageURL(row.imageURL) ?? imageURL(forRecipeID: row.id),
                 totalTime: row.totalTime,
                 servings: 0
             )
@@ -355,7 +372,7 @@ final class MealieRepository {
 
     // MARK: - Cache-IDs
 
-    /// `plan:{date}:{meal_type}:{recipe_id}` bzw. `plan:text:{hash}` —
+    /// `plan:{date}:{meal_type}:{recipe_id}` bzw. `plan:text:{entry_id}` —
     /// stabil und kollisionsfrei.
     static func planCacheID(for item: MealieMealPlanItem) -> String {
         item.id
@@ -368,6 +385,20 @@ final class MealieRepository {
         let parts = id.split(separator: ":", maxSplits: 3, omittingEmptySubsequences: false)
         guard parts.count == 4, parts[0] == "plan" else { return nil }
         return String(parts[3])
+    }
+
+    /// Liest die Server-ID eines Freitext-Eintrags aus seiner Plan-Cache-ID
+    /// zurück; `nil` für Rezeptzeilen und für den Inhalts-Hash-Rückfall.
+    ///
+    /// Ohne diesen Rückweg verlöre der Cache die Unterscheidung zweier
+    /// inhaltsgleicher Einträge: `cachedPlan` baut die Normalform neu und
+    /// berechnet ihre ID erneut (MARAAA-140/N2). Mealie vergibt
+    /// `ReadPlanEntry.id` als UUID; der Rückfall-Hash besteht aus 16
+    /// Hex-Zeichen ohne Bindestriche und ist deshalb keine UUID.
+    static func entryID(fromPlanCacheID id: String) -> String? {
+        guard id.hasPrefix(MealieMealPlanItem.textPrefix) else { return nil }
+        let raw = String(id.dropFirst(MealieMealPlanItem.textPrefix.count))
+        return UUID(uuidString: raw) == nil ? nil : raw
     }
 
     // MARK: - Intern

@@ -39,6 +39,10 @@ struct MealieView: View {
     }
 
     /// Baut das ViewModel mit dem Kontext aus I2 und lädt den ersten Stand.
+    /// Der Aufruf hängt an `.task` der Wurzel und läuft deshalb bei jeder
+    /// Rückkehr in den Tab erneut: eine in den Einstellungen hinterlegte oder
+    /// korrigierte Mealie-Basis-URL wird damit ohne App-Neustart wirksam
+    /// (MARAAA-140/M1).
     /// Die Grocy-Ablage kommt aus `GrocyRepositoryProvider.shared(context:)` —
     /// diese Instanz hält die app-weit geteilte Pending-Queue, die der
     /// Einkaufs-Tab beim Öffnen liest und replays; der Rezepte-Tab legt keine
@@ -246,13 +250,21 @@ private struct MealieContentView: View {
         }
     }
 
-    /// Rezeptbild über den authentifizierten Loader; Platzhalter, wenn die
-    /// Mealie-Antwort keine Rezept-ID für die Bild-Route hatte. Ein direkter
-    /// `URLSession`-Aufruf lädt ohne CF-/Bearer-Header und ist deshalb tabu.
+    /// Rezeptbild über den authentifizierten Loader; Platzhalter nur, wenn die
+    /// Mealie-Antwort keine Rezept-ID für die Bild-Route hatte. Maßgeblich ist
+    /// die Rezept-ID (`row.imageID`), **nicht** die beim Laden gebildete
+    /// Adresse: die Basis-URL wird erst beim Zugriff aufgelöst, sodass eine
+    /// nachträglich hinterlegte oder korrigierte Basis ohne App-Neustart
+    /// greift (MARAAA-140/M1). Ein direkter `URLSession`-Aufruf lädt ohne
+    /// CF-/Bearer-Header und ist deshalb tabu.
     @ViewBuilder
     private func thumbnail(_ row: MealieRecipeRow) -> some View {
-        if row.imageURL != nil {
-            MealieImageView(recipeID: row.id, repository: model.imageRepository)
+        if let imageID = row.imageID {
+            MealieImageView(
+                recipeID: imageID,
+                repository: model.imageRepository,
+                imageURL: row.imageURL
+            )
         } else {
             placeholderImage
                 .frame(width: 48, height: 48)
