@@ -34,8 +34,11 @@ struct SessionListView: View {
     let onLoadMore: () -> Void
     let onRetry: () -> Void
 
-    /// §4.1: Vorschau auf 80 Zeichen, eine Zeile.
-    private static let previewLimit = 80
+    /// §4.1: Vorschau auf `maxPreviewCharacters` Zeichen, eine Zeile.
+    /// Der Wert kommt aus der Chat-Konfiguration — kein zweites Literal.
+    private static var previewLimit: Int {
+        HermesChatConfiguration().maxPreviewCharacters
+    }
 
     var body: some View {
         NavigationStack {

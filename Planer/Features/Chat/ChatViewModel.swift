@@ -50,6 +50,9 @@ final class ChatViewModel: ObservableObject {
         // Werkzeug
         var toolCallID: String?
         var toolName: String?
+        /// E4: `emoji` aus `hermes.tool.progress` (nur bei `running` gesetzt).
+        /// `nil` = kein Emoji geliefert (gespeicherte Nachrichten) → generisches Symbol.
+        var toolEmoji: String?
         /// JSON-Text, roh aus `tool_calls[].function.arguments`.
         var toolArgs: String?
         /// Text aus der `tool`-Nachricht.
@@ -71,6 +74,7 @@ final class ChatViewModel: ObservableObject {
             engine: ChatEngine? = nil,
             toolCallID: String? = nil,
             toolName: String? = nil,
+            toolEmoji: String? = nil,
             toolArgs: String? = nil,
             toolResult: String? = nil,
             toolStatus: ToolCallStatus? = nil,
@@ -86,6 +90,7 @@ final class ChatViewModel: ObservableObject {
             self.engine = engine
             self.toolCallID = toolCallID
             self.toolName = toolName
+            self.toolEmoji = toolEmoji
             self.toolArgs = toolArgs
             self.toolResult = toolResult
             self.toolStatus = toolStatus
@@ -125,14 +130,25 @@ final class ChatViewModel: ObservableObject {
     private let configuration: HermesChatConfiguration
 
     private var streamTask: Task<Void, Never>?
-    /// Höchste bereits dargestellte Nachrichten-ID.
+    /// Höchste bereits dargestellte Nachrichten-ID; `0` ist die Baseline einer
+    /// geladenen, aber leeren Session (E5) — nie eine echte Server-ID.
     private var watermark: Int?
     private var optimisticUserEntryID: UUID?
     /// Während des Stroms angelegte Agent-/Werkzeug-/Freigabe-Einträge.
     private var turnEntryIDs: Set<UUID> = []
-    /// `true`, sobald der Strom tatsächlich gestartet wurde. Davor gilt ein
-    /// Fehler als „nichts gesendet“.
+    /// `true`, sobald der Strom tatsächlich ein Ereignis geliefert hat. Davor
+    /// gilt ein Fehler als „nichts gesendet“ (§4.8/F10).
     private var streamStarted = false
+    /// E5: Verlauf wirklich geladen — auch eine leere Seite zählt. Privat; die
+    /// View liest den Zustand ausschließlich über `canSend` (§9.3).
+    private var historyLoaded = false
+    /// Die Session wurde in genau diesem Turn per `POST /api/sessions` angelegt;
+    /// nur dann ist `watermark == nil` für den Merge zulässig (§5.5).
+    private var createdSessionThisTurn = false
+    /// Der Verlauf war beim Senden leer (F15: Header fehlt ⇒ Warnung).
+    private var turnHistoryWasEmpty = false
+    /// H1: Der Server hat den Session-Header in der Antwort mitgeschickt.
+    private var receivedSessionHeader = false
     private var sessionOffset = 0
     private var historyPagesLoaded = 0
     private var didWarnReasoningTruncated = false
@@ -152,6 +168,9 @@ final class ChatViewModel: ObservableObject {
         !isStreaming
             && !isLoadingHistory
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            // E5: eine bestehende Session darf erst senden, wenn ihr Verlauf
+            // (auch eine leere Seite) geladen ist. `nil` = neue Session.
+            && (currentSession == nil || historyLoaded)
     }
 
     // MARK: Verlauf
@@ -216,6 +235,7 @@ final class ChatViewModel: ObservableObject {
         currentSession = summary
         entries = []
         watermark = nil
+        historyLoaded = false
         hasMoreOlder = false
         historyPagesLoaded = 0
         didWarnReasoningTruncated = false
@@ -229,7 +249,10 @@ final class ChatViewModel: ObservableObject {
                 order: .latest
             )
             entries = Self.map(messages: page.messages, engine: .hermes)
-            watermark = page.messages.map(\.id).max()
+            // E5: auch eine leere, gültige Seite gibt den Composer frei. Die
+            // Baseline `0` verhindert, dass alte Historie als neuer Turn gilt.
+            watermark = page.messages.map(\.id).max() ?? 0
+            historyLoaded = true
             historyPagesLoaded = 1
             hasMoreOlder = page.returned == configuration.messagePageSize
         } catch {
@@ -237,6 +260,7 @@ final class ChatViewModel: ObservableObject {
                 currentSession = nil
                 entries = []
                 watermark = nil
+                historyLoaded = false
                 hasMoreOlder = false
                 await loadSessions()
                 notice = "Die Unterhaltung existiert nicht mehr."
@@ -294,6 +318,7 @@ final class ChatViewModel: ObservableObject {
         entries = []
         currentSession = nil
         watermark = nil
+        historyLoaded = false
         hasMoreOlder = false
         historyPagesLoaded = 0
         notice = nil
@@ -321,11 +346,24 @@ final class ChatViewModel: ObservableObject {
         // N4: der Nutzer sendet — laufendes Vorlesen endet sofort.
         voice?.stopSpeaking()
 
+        // E5/M4: Der Verlauf muss geladen sein, sonst ist kein Merge erlaubt.
+        // `canSend` prüft das bereits; hier steht der zweite, billige Riegel.
+        guard currentSession == nil || historyLoaded else {
+            draft = text
+            notice = "Der Verlauf ist noch nicht geladen."
+            return
+        }
+
         let entry = Entry(kind: .user, text: text)
         entries.append(entry)
         optimisticUserEntryID = entry.id
         turnEntryIDs = []
         streamStarted = false
+        createdSessionThisTurn = false
+        receivedSessionHeader = false
+        turnHistoryWasEmpty = watermark == nil || watermark == 0
+        // Ein Hinweis „Denken wurde gekürzt.“ gilt je Turn, nicht je Chat.
+        didWarnReasoningTruncated = false
 
         isStreaming = true
         streamTask = Task { await run(text: text) }
@@ -432,6 +470,7 @@ final class ChatViewModel: ObservableObject {
         defer {
             isStreaming = false
             statusNote = nil
+            createdSessionThisTurn = false
         }
         do {
             let sessionID = try await prepareSession()
@@ -453,6 +492,7 @@ final class ChatViewModel: ObservableObject {
                     currentSession = nil
                     entries = []
                     watermark = nil
+                    historyLoaded = false
                     hasMoreOlder = false
                     await loadSessions()
                     throw TurnFailure.sessionGone
@@ -464,24 +504,63 @@ final class ChatViewModel: ObservableObject {
         do {
             let created = try await api.createSession()
             currentSession = created
-            watermark = nil
+            // E5/M4: eine neue Session hat keine Historie; die Baseline `0`
+            // ist erlaubt, weil dieser Turn sie selbst angelegt hat.
+            watermark = 0
+            historyLoaded = true
+            createdSessionThisTurn = true
             return created.id
         } catch {
-            // Kein headerloser Fallback: der wäre unsichtbar (F10).
-            throw TurnFailure.createFailed
+            // E2: F1/F2/F22/422/andere 4xx und Abbruch behalten ihre Meldung;
+            // nur Transport/Timeout/5xx/Unklassifiziertes wird zu F10.
+            if Self.isCreateFailure(error) {
+                throw TurnFailure.createFailed
+            }
+            throw error
+        }
+    }
+
+    /// E2: F10 ist der letzte Fall, kein Sammelbecken.
+    private static func isCreateFailure(_ error: Error) -> Bool {
+        if error is CancellationError { return false }
+        if error is HermesChatConfigurationError { return false }
+        guard let apiError = error as? APIError else { return true }
+        switch apiError {
+        case .timeout, .offline:
+            return true
+        case .server(let status, _, _, _):
+            return status >= 500
+        case .unauthorized, .forbidden, .notFound, .conflict,
+             .rateLimited, .cancelled, .emptyResponse:
+            return false
+        case .validation:
+            // F9: 400 `invalid_title` wird wie F10 abgebrochen (gleicher Text);
+            // die App sendet keinen Titel, der Fall bleibt defensiv.
+            return true
+        case .invalidConfiguration, .invalidRequest, .invalidResponse, .decoding:
+            return true
         }
     }
 
     private func streamTurn(sessionID: String, text: String) async throws {
-        streamStarted = true
         var pendingEngine: ChatEngine?
         var agentEntryID: UUID?
         var didFinish = false
+        // H1: die Antwort-ID kann von der gesendeten abweichen.
+        var effectiveSessionID = sessionID
         defer { voice?.finishAssistantStream() }
 
         for try await event in provider.stream(sessionID: sessionID, userText: text) {
+            // H2: erst ein tatsächlich empfangenes Ereignis beweist, dass der
+            // Strom läuft. Ein Fehler davor rollt den Entwurf zurück (§4.8).
+            streamStarted = true
             try Task.checkCancellation()
             switch event {
+            case .sessionID(let responseID):
+                receivedSessionHeader = true
+                effectiveSessionID = responseID
+                adoptSessionID(responseID)
+
             case .engine(let engine):
                 pendingEngine = engine
                 if let index = index(of: agentEntryID) {
@@ -524,9 +603,32 @@ final class ChatViewModel: ObservableObject {
             }
         }
 
-        if didFinish {
-            await merge(sessionID: sessionID)
+        // F15: Der Server hat keine Antwort-ID geliefert, und es gab noch keinen
+        // Verlauf, der fortgesetzt werden könnte. Ein F12-Fehler hat Vorrang;
+        // der Merge-Hinweis darf diese Warnung nicht überschreiben.
+        if !receivedSessionHeader, turnHistoryWasEmpty, notice == nil {
+            notice = "Der Verlauf wird nicht fortgesetzt (Sitzungs-Header fehlt)."
         }
+
+        if didFinish {
+            await merge(sessionID: effectiveSessionID)
+        }
+    }
+
+    /// Übernimmt eine abweichende Antwort-ID in `currentSession` (§4.4/7).
+    private func adoptSessionID(_ responseID: String) {
+        guard let session = currentSession, session.id != responseID else { return }
+        currentSession = SessionSummary(
+            id: responseID,
+            title: session.title,
+            preview: session.preview,
+            messageCount: session.messageCount,
+            toolCallCount: session.toolCallCount,
+            lastActive: session.lastActive,
+            pinned: session.pinned,
+            archived: session.archived,
+            source: session.source
+        )
     }
 
     private func ensureAgentEntry(_ id: inout UUID?, engine: ChatEngine?) -> UUID {
@@ -556,6 +658,11 @@ final class ChatViewModel: ObservableObject {
             if let label = progress.label, !label.isEmpty {
                 entries[index].toolName = label
             }
+            // E4: `completed` trägt kein Emoji und löscht den vorhandenen Wert nicht.
+            if progress.status == .running,
+               let emoji = progress.emoji, !emoji.isEmpty {
+                entries[index].toolEmoji = emoji
+            }
             entries[index].toolStatus = status
             return
         }
@@ -565,6 +672,7 @@ final class ChatViewModel: ObservableObject {
             text: "",
             toolCallID: progress.toolCallID,
             toolName: progress.label ?? progress.tool,
+            toolEmoji: progress.status == .running ? progress.emoji : nil,
             toolStatus: status
         )
         entries.append(entry)
@@ -601,6 +709,12 @@ final class ChatViewModel: ObservableObject {
     // MARK: Merge nach einem Turn (§5.5)
 
     private func merge(sessionID: String) async {
+        // E5/M4: Ein Merge mit `watermark == nil` ist nur für eine in genau
+        // diesem Turn angelegte Session zulässig. Der Fall „openSession
+        // fehlgeschlagen, dann gesendet“ ist durch `canSend` gesperrt; dieser
+        // Riegel ist die zweite, billige Sicherung.
+        guard watermark != nil || createdSessionThisTurn else { return }
+
         do {
             let page = try await api.messages(
                 sessionID: sessionID,
@@ -613,7 +727,10 @@ final class ChatViewModel: ObservableObject {
                 .sorted { $0.id < $1.id }
 
             guard !fresh.isEmpty else {
-                notice = "Antwort nicht im Verlauf gespeichert."
+                // F12: eine bereits gesetzte Fehlermeldung hat Vorrang.
+                if notice == nil {
+                    notice = "Antwort nicht im Verlauf gespeichert."
+                }
                 return
             }
 
@@ -657,6 +774,7 @@ final class ChatViewModel: ObservableObject {
                 watermark = last.id
             }
             turnEntryIDs = []
+            createdSessionThisTurn = false
 
             await loadSessions()
             syncCurrentSessionWithList()
@@ -875,6 +993,11 @@ final class ChatViewModel: ObservableObject {
         }
 
         if isCancellation(error) {
+            // E2/F7: ein Abbruch vor dem ersten Ereignis ist „nichts gesendet“ —
+            // der Entwurf kehrt zurück. Während des Stroms bleibt der Teilstand.
+            if !streamStarted {
+                rollbackUserEntry(text: text)
+            }
             notice = "Antwort abgebrochen."
             return
         }
@@ -907,12 +1030,31 @@ final class ChatViewModel: ObservableObject {
             } else {
                 message = streamError.errorDescription ?? "Stream-Fehler."
             }
+        } else if let urlError = error as? URLError {
+            // M2: `URLSession.AsyncBytes` kann mitten im Strom werfen; daraus
+            // darf nie „Unbekannter Fehler.“ werden.
+            message = Self.describe(urlError)
         } else if let localized = (error as? LocalizedError)?.errorDescription {
             message = localized
         } else {
             message = "Unbekannter Fehler."
         }
         return boundedText(message, limit: configuration.maxNoticeCharacters)
+    }
+
+    /// F6: Timeout/Offline/Abbruch aus `URLError` mit den festgelegten Texten.
+    private static func describe(_ error: URLError) -> String {
+        switch error.code {
+        case .cancelled:
+            return "Antwort abgebrochen."
+        case .timedOut:
+            return APIError.timeout.errorDescription ?? "Zeitüberschreitung — Dienst nicht erreichbar."
+        case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+             .cannotFindHost, .dnsLookupFailed:
+            return APIError.offline.errorDescription ?? "Keine Netzwerkverbindung."
+        default:
+            return "Die Verbindung zu Hermes wurde unterbrochen."
+        }
     }
 
     private static func describe(_ error: APIError) -> String {
@@ -930,6 +1072,9 @@ final class ChatViewModel: ObservableObject {
             return "Zu viele Anfragen — bitte später erneut versuchen."
         case .offline, .timeout:
             return error.errorDescription ?? "Keine Verbindung zu Hermes."
+        case .server(let status, _, let message, _) where status < 500:
+            // 422/andere 4xx: der Servertext ist die Meldung (E2), kein F10.
+            return message
         default:
             return error.errorDescription ?? "Netzwerkfehler."
         }

@@ -39,6 +39,11 @@ enum ChatEngine: String, Equatable, Sendable {
 /// Grenze: keine Werkzeugausführung. `toolProgress` beschreibt nur, was der
 /// Server ohnehin tut.
 enum ChatStreamEvent: Equatable, Sendable {
+    /// Antwort-ID aus dem Session-Header (§4.4 Schritt 7, F15).
+    ///
+    /// Wird nur gesendet, wenn der Server den Header mitschickt. Das ViewModel
+    /// übernimmt eine abweichende ID; fehlt der Header, bleibt die gesendete ID.
+    case sessionID(String)
     /// Herkunft, vor dem ersten Delta (N7). In v1 immer `.hermes`.
     case engine(ChatEngine)
     /// `choices[0].delta.reasoning_content`
@@ -156,6 +161,11 @@ struct HermesChatStreamProvider: ChatStreamProvider {
         userText: String,
         continuation: AsyncThrowingStream<ChatStreamEvent, Error>.Continuation
     ) async throws {
+        // O1/N2: denselben einen Guard wie die API benutzen — kein zweiter
+        // Guard-Ort, keine Kopie der URL. Der Wert kommt aus der Keychain.
+        let service = try ServiceConfiguration.load(.hermes)
+        try HermesChatConfiguration.validateBaseURL(path: service.baseURL.path)
+
         // Request und Header kommen aus dem `NetworkClient` — dieselbe Kette wie
         // jeder andere Dienst und damit genau eine Header-Injektion.
         let request = APIRequest(
@@ -194,19 +204,47 @@ struct HermesChatStreamProvider: ChatStreamProvider {
             )
         }
 
+        // H1/F15: Die Antwort-ID aus dem Header ist die einzige verlässliche
+        // Quelle nach einem Turn. Sie wird vor jedem Inhalt gemeldet.
+        if let responseSessionID = http.value(forHTTPHeaderField: configuration.sessionHeader),
+           !responseSessionID.isEmpty {
+            continuation.yield(.sessionID(responseSessionID))
+        }
+
         // N7: die Herkunft steht fest, bevor der erste Text ankommt.
         continuation.yield(.engine(.hermes))
 
-        if HermesHTTP.isEventStream(
-            http,
-            eventStreamContentType: configuration.eventStreamContentType
-        ) {
-            try await consumeEventStream(bytes, continuation: continuation)
-        } else {
-            // Ein Server, der trotz `stream: true` ein JSON-Objekt liefert, ist
-            // kein Fehler: die Antwort wird als ein Stück ausgegeben.
-            let body = try await HermesHTTP.collect(bytes, limit: Self.maxJSONBodyBytes)
-            try emit(responseBody: body, continuation: continuation)
+        do {
+            if HermesHTTP.isEventStream(
+                http,
+                eventStreamContentType: configuration.eventStreamContentType
+            ) {
+                try await consumeEventStream(bytes, continuation: continuation)
+            } else {
+                // Ein Server, der trotz `stream: true` ein JSON-Objekt liefert, ist
+                // kein Fehler: die Antwort wird als ein Stück ausgegeben.
+                let body = try await HermesHTTP.collect(bytes, limit: Self.maxJSONBodyBytes)
+                try emit(responseBody: body, continuation: continuation)
+            }
+        } catch let error as URLError {
+            // M2: `URLSession.AsyncBytes` wirft mitten im Strom. Ohne dieses
+            // Mapping käme beim Nutzer „Unbekannter Fehler.“ an.
+            throw Self.streamError(from: error)
+        } catch is CancellationError {
+            throw ChatStreamError.cancelled
+        }
+    }
+
+    /// Bildet einen `URLError` aus dem laufenden Strom auf die festgelegten
+    /// Fälle ab (F6): Timeout, offline, Abbruch.
+    private static func streamError(from error: URLError) -> ChatStreamError {
+        switch error.code {
+        case .cancelled:
+            return .cancelled
+        case .timedOut:
+            return .http(.timeout)
+        default:
+            return .http(.offline)
         }
     }
 

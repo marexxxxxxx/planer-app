@@ -317,13 +317,24 @@ else
 fi
 
 # --- V3/V5: Herkunft der Antwort ist markiert (§7) ------------------------
+#
+# Nach CH1/CH2 heißt der Marker `Entry.engine` (ViewModel-Feld), das Ereignis
+# `case engine` (Provider) und die Anzeige `entry.engine` (View). Geprüft wird
+# weiterhin die ganze Kette — ein fehlendes Glied bleibt rot.
 
-if grep -qE 'case engine' Planer/Features/Chat/ChatStreamProvider.swift 2>/dev/null; then
-    engine_hits="$(count_matches 'Entry\.engine' Planer/Features/Chat)"
-    if [[ "$engine_hits" -ge 1 ]]; then
+if grep -qE 'case engine\(' Planer/Features/Chat/ChatStreamProvider.swift 2>/dev/null; then
+    engine_model=0
+    engine_view=0
+    if grep -qE 'var engine: ChatEngine\?' Planer/Features/Chat/ChatViewModel.swift; then
+        engine_model=1
+    fi
+    if grep -qE 'entry\.engine' Planer/Features/Chat/ChatView.swift; then
+        engine_view=1
+    fi
+    if [[ "$engine_model" -eq 1 && "$engine_view" -eq 1 ]]; then
         pass "§13: die Herkunft der Antwort ist am Chat-Eintrag markiert"
     else
-        fail_check "§13: die Herkunft der Antwort ist am Chat-Eintrag markiert"
+        fail_check "§13: die Herkunft der Antwort ist am Chat-Eintrag markiert (Modell: $engine_model, View: $engine_view)"
     fi
 else
     skip "V3/V5: ChatStreamProvider kennt noch keinen engine-Fall"

@@ -50,6 +50,8 @@ extension ToolCallStatus {
 struct ToolCallCard: View {
 
     let name: String
+    /// E4: `emoji` aus `hermes.tool.progress`; `nil` → generisches SF-Symbol.
+    let emoji: String?
     let status: ToolCallStatus
     /// Roher JSON-Text aus `tool_calls[].function.arguments`; `nil` = nicht geladen.
     let argumentsText: String?
@@ -64,9 +66,14 @@ struct ToolCallCard: View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
             Button(action: onToggle) {
                 HStack(spacing: DesignTokens.Spacing.xs) {
-                    Image(systemName: "wrench.and.screwdriver")
-                        .font(DesignTokens.Typography.footnote)
-                        .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                    if let emoji, !emoji.isEmpty {
+                        Text(emoji)
+                            .font(DesignTokens.Typography.footnote)
+                    } else {
+                        Image(systemName: "wrench.and.screwdriver")
+                            .font(DesignTokens.Typography.footnote)
+                            .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                    }
 
                     Text(name)
                         .font(DesignTokens.Typography.footnote.monospaced())
@@ -143,6 +150,7 @@ struct ToolCallCard: View {
     VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
         ToolCallCard(
             name: "hermes_tasks_list",
+            emoji: "📋",
             status: .running,
             argumentsText: nil,
             resultText: nil,
@@ -151,6 +159,7 @@ struct ToolCallCard: View {
         )
         ToolCallCard(
             name: "hermes_tasks_list",
+            emoji: "📋",
             status: .completed,
             argumentsText: "{\n  \"status\": \"open\"\n}",
             resultText: "3 offene Aufgaben",
@@ -159,6 +168,7 @@ struct ToolCallCard: View {
         )
         ToolCallCard(
             name: "grocy_stock_get",
+            emoji: nil,
             status: .completed,
             argumentsText: nil,
             resultText: nil,

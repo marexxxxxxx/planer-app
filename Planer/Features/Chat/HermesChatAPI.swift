@@ -31,7 +31,11 @@ struct HermesChatAPI: Sendable {
     ) {
         self.configuration = configuration
         self.reader = networkClient ?? NetworkClient(timeout: configuration.restTimeout)
-        self.writer = NetworkClient(timeout: configuration.restTimeout, retryPolicy: RetryPolicy(maxAttempts: 1))
+        // E1: Argumente in Deklarationsreihenfolge `init(session:retryPolicy:timeout:keychain:)`.
+        self.writer = NetworkClient(
+            retryPolicy: RetryPolicy(maxAttempts: 1),
+            timeout: configuration.restTimeout
+        )
     }
 
     // MARK: Lesen

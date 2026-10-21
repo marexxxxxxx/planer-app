@@ -164,7 +164,16 @@ struct ChatView: View {
                 LazyVStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
                     if viewModel.hasMoreOlder {
                         Button {
-                            Task { await viewModel.loadOlderMessages() }
+                            // M3/E5: Anker ist die `Entry.id` des bisher ersten
+                            // sichtbaren Eintrags — kein Index, kein Offset.
+                            let anchorID = viewModel.entries.first?.id
+                            Task { @MainActor in
+                                await viewModel.loadOlderMessages()
+                                guard let anchorID else { return }
+                                // Erst rendern lassen, dann auf den Anker springen.
+                                await Task.yield()
+                                proxy.scrollTo(anchorID, anchor: .top)
+                            }
                         } label: {
                             Text(viewModel.isLoadingHistory ? "Lade ältere Nachrichten …" : "Ältere laden")
                                 .font(DesignTokens.Typography.footnote)
@@ -231,6 +240,7 @@ struct ChatView: View {
         case .tool:
             ToolCallCard(
                 name: entry.toolName ?? "Werkzeug",
+                emoji: entry.toolEmoji,
                 status: entry.toolStatus ?? .running,
                 argumentsText: entry.toolArgs,
                 resultText: entry.toolResult,
@@ -305,6 +315,22 @@ struct ChatView: View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
             if viewModel.isLoadingHistory {
                 ProgressView("Lade Verlauf …")
+            } else if let session = viewModel.currentSession, let notice = viewModel.notice {
+                // Fehler + leerer Verlauf: Fehlerzustand statt Leerzustand.
+                Image(systemName: "wifi.slash")
+                    .font(.largeTitle)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+
+                Text(notice)
+                    .font(DesignTokens.Typography.callout)
+                    .foregroundStyle(DesignTokens.Palette.label)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Erneut laden") {
+                    Task { await viewModel.openSession(session) }
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Verlauf erneut laden")
             } else if let session = viewModel.currentSession {
                 Image(systemName: "text.bubble")
                     .font(.largeTitle)
