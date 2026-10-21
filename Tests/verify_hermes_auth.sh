@@ -17,6 +17,11 @@
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen WP-Abnahmen laufen ebenfalls über grep-/Schema-Prüfungen.
 #
+# Grenze der Prüfung (MARAAA-149): der 401-Grundfilter wird strukturell über
+# den Funktionskörper von `indicatesExpiredSession` geprüft (Rückgabe `false`
+# im Guard, Entscheidung über beide Mengen, kein pauschales `return true`).
+# Ein echter Swift-Laufzeittest für „fremder Grund → kein Re-Login" fehlt.
+#
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -178,6 +183,13 @@ forbid "keine Zugangsdaten im Fehlertext (Passwort)" \
 
 # --- (4) Cookies ----------------------------------------------------------
 
+# Die beiden Wiederholungspfade werden hier einmal abgegrenzt, damit die
+# Cookie-Injektion **je Pfad** geprüft werden kann: die Zeichenkette steht in
+# beiden Pfaden, eine dateiweite Suche deckt eine fehlende Stelle deshalb ab
+# (MARAAA-149, MARAAA-148).
+perform_section="$(section_between 'private func performRaw' '// MARK: - Hermes-Anmeldung' "$client")"
+stream_section="$(section_between 'private func performStream' '// MARK: - Request-Aufbau' "$client")"
+
 require_fixed "Cookie-Header wird aus den gespeicherten Cookies gebaut" \
     'HTTPCookie.requestHeaderFields(with:' "$session"
 require_fixed "Set-Cookie wird über HTTPCookie gelesen" \
@@ -186,8 +198,16 @@ require_fixed "Cookies werden aus der Antwort gespeichert" \
     'HermesCookieJar.shared.replace(from:' "$client"
 require_fixed "Hermes-Requests senden den Cookie-Header" \
     'request.setValue(cookie, forHTTPHeaderField: "Cookie")' "$client"
-require_fixed "auch der Stream sendet den Cookie-Header" \
-    'injectHermesCookies(into: &retried)' "$client"
+if grep -qF 'injectHermesCookies(into: &retried)' <<<"$stream_section"; then
+    pass "der Stream sendet nach dem Re-Login den Cookie-Header"
+else
+    fail_check "der Stream sendet nach dem Re-Login den Cookie-Header"
+fi
+if grep -qF 'injectHermesCookies(into: &retried)' <<<"$perform_section"; then
+    pass "performRaw sendet nach dem Re-Login den Cookie-Header"
+else
+    fail_check "performRaw sendet nach dem Re-Login den Cookie-Header"
+fi
 forbid_fixed "keine Cookie-Ablage in UserDefaults (Jar)" \
     'UserDefaults.' "$session"
 forbid_fixed "keine Cookie-Ablage in UserDefaults (Client)" \
@@ -198,6 +218,32 @@ forbid_fixed "keine Cookie-Ablage in UserDefaults (Client)" \
 for value in no_cookie invalid_or_expired_session session_expired unauthenticated; do
     require_fixed "401-Grund $value wird erkannt" "\"$value\"" "$session"
 done
+
+# Die vier Literale oben belegen nur, dass die Werte irgendwo in der Datei
+# stehen. Der Filter selbst muss sie auch auswerten — und für einen fremden
+# Grund `false` liefern. Ohne Swift-Laufzeit geschieht das strukturell über den
+# Funktionskörper von `indicatesExpiredSession` (MARAAA-149).
+auth_filter_section="$(section_between 'static func indicatesExpiredSession' 'final class HermesCookieJar' "$session")"
+if grep -qF 'return false' <<<"$auth_filter_section"; then
+    pass "401-Filter liefert für fremde Gründe false"
+else
+    fail_check "401-Filter liefert für fremde Gründe false"
+fi
+if grep -qF 'expiredReasons.contains(failure.reason' <<<"$auth_filter_section"; then
+    pass "401-Filter entscheidet über expiredReasons"
+else
+    fail_check "401-Filter entscheidet über expiredReasons"
+fi
+if grep -qF 'expiredErrors.contains(failure.error' <<<"$auth_filter_section"; then
+    pass "401-Filter entscheidet über expiredErrors"
+else
+    fail_check "401-Filter entscheidet über expiredErrors"
+fi
+if grep -qE 'return[[:space:]]+true' <<<"$auth_filter_section"; then
+    fail_check "401-Filter löst nicht pauschal für jeden 401 aus"
+else
+    pass "401-Filter löst nicht pauschal für jeden 401 aus"
+fi
 
 require_fixed "Re-Login ist durch ein Guard-Flag begrenzt" \
     'didRelogin' "$client"
@@ -216,7 +262,6 @@ else
     fail_check "Re-Login wird auf beiden Wegen nur einmal ausgelöst (gefunden: $guards)"
 fi
 
-perform_section="$(section_between 'private func performRaw' '// MARK: - Hermes-Anmeldung' "$client")"
 if [[ -n "$perform_section" ]] \
     && grep -qF 'http.statusCode == 401' <<<"$perform_section" \
     && grep -qF 'service == .hermes' <<<"$perform_section"; then
@@ -230,7 +275,6 @@ else
     fail_check "performRaw prüft den 401-Grund vor dem Re-Login"
 fi
 
-stream_section="$(section_between 'private func performStream' '// MARK: - Request-Aufbau' "$client")"
 if [[ -n "$stream_section" ]] \
     && grep -qF 'HermesAuthFailure.indicatesExpiredSession(body)' <<<"$stream_section" \
     && grep -qF 'loginHermes(configuration: configuration)' <<<"$stream_section"; then
