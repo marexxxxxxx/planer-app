@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
 # Statische Abnahme für spec-chat Rev 4 (CH1 = Daten, CH2 = UI; N1–N6 eingearbeitet).
+# MARAAA-155: Verlauf aller nutzerseitigen Quellen; `desktop` ist nur noch der
+# Source-Tag beim Anlegen, kein Listenfilter. Die frühere Erwartung
+# `source`-Query + Client-Filter ist damit sachlich überholt und wird gebannt.
 # Keine Swift-Toolchain nötig — geprüft werden Dateien und Symbole.
 #
 #   bash Tests/verify_chat_sessions.sh data   # CH1
@@ -114,7 +117,38 @@ data_layer() {
     need "$chat/HermesChatAPI.swift" 'func messages\(sessionID:' "API messages"
     need "$chat/HermesChatAPI.swift" 'func respondToApproval\(runID:' "API respondToApproval"
     need "$chat/ChatConfiguration.swift" 'approvalPath' "Freigabe-Pfad konfiguriert"
-    need "$chat/ChatConfiguration.swift" 'sessionSource = "desktop"' "Source desktop"
+    # Präzisiert für MARAAA-155: `desktop` ist nur noch der Source-Tag beim
+    # **Anlegen** einer Sitzung, nicht mehr der Filter der Verlaufsliste.
+    need "$chat/ChatConfiguration.swift" 'sessionSource = "desktop"' \
+        "Source desktop beim Anlegen"
+
+    # MARAAA-155: Verlauf aller nutzerseitigen Quellen, nur cron/subagent aus.
+    ban  "$chat/HermesChatAPI.swift" 'URLQueryItem\(name: "source"' \
+        "kein source-Query-Zwang in listSessions"
+    need "$chat/HermesChatAPI.swift" 'CreateSessionBody\(source: configuration\.sessionSource\)' \
+        "neue Sitzung trägt weiterhin source=desktop"
+    need "$chat/ChatConfiguration.swift" \
+        'var hiddenSessionSources: Set<String> = \["cron", "subagent"\]' \
+        "cron/subagent sind die einzigen ausgeblendeten Quellen"
+    need "$chat/ChatConfiguration.swift" 'func showsSessionSource\(' \
+        "Sichtbarkeitsregel an genau einer Stelle"
+    need "$chat/ChatViewModel.swift" 'configuration\.showsSessionSource\(' \
+        "ViewModel nutzt die Sichtbarkeitsregel"
+    ban  "$chat/ChatViewModel.swift" '\$0\.source == configuration\.sessionSource' \
+        "kein Client-Filter auf desktop"
+    need "$chat/ChatViewModel.swift" 'sessionID: summary\.id' \
+        "openSession lädt die Nachrichten der gewählten Sitzung (auch telegram)"
+    need "$chat/ChatDTOs.swift" 'var sourceBadge: String' \
+        "Badge-Zuordnung an genau einer Stelle"
+    for mapping in 'case "telegram": return "Telegram"' \
+                   'case "desktop": return "App"' \
+                   'case "dashboard": return "Dashboard"' \
+                   'case "api_server": return "API"' \
+                   'case "cli": return "CLI"'; do
+        need "$chat/ChatDTOs.swift" "$mapping" "Badge: $mapping"
+    done
+    need "$chat/ChatDTOs.swift" 'default: return source' \
+        "unbekannte Quelle fällt auf den Rohwert zurück"
 
     # Befund 4/5: Zeit- und Retry-Klassen an der Konstruktion, ein Client je Klasse.
     need "$chat/HermesChatAPI.swift" \
@@ -243,6 +277,10 @@ ui_layer() {
     # H8-Ersatz: die Chips fragen die fail-closed-Prädikate, statt Choices zu raten.
     need "$chat/ToolConfirmationChips.swift" 'canApproveOnce' "Chips: once nur wenn angeboten"
     need "$chat/ToolConfirmationChips.swift" 'canDeny' "Chips: deny nur wenn angeboten"
+
+    # MARAAA-155: jede Zeile zeigt die Quelle als Badge.
+    need "$chat/SessionListView.swift" 'Text\(session\.sourceBadge\)' \
+        "Zeile zeigt das Quellen-Badge aus der einen Zuordnung"
 
     # Befund 2: hier steht bewusst KEINE Prüfung von ChatViewModel.swift —
     # die Datei gehört CH1, und der Default wird an der Deklaration geprüft.

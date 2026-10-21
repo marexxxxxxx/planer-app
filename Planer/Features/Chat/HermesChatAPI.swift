@@ -40,13 +40,15 @@ struct HermesChatAPI: Sendable {
 
     // MARK: Lesen
 
+    /// Alle Quellen; die App blendet nur interne Quellen aus (MARAAA-155).
+    /// Ein `source`-Query-Parameter würde die Hermes-Historie auf `desktop`
+    /// verkürzen und fehlt deshalb bewusst.
     func listSessions(limit: Int, offset: Int) async throws -> SessionPage {
         try await validateBaseURL()
         let request = APIRequest(
             method: .get,
             path: configuration.sessionsPath,
             query: [
-                URLQueryItem(name: "source", value: configuration.sessionSource),
                 URLQueryItem(name: "limit", value: String(limit)),
                 URLQueryItem(name: "offset", value: String(offset))
             ]

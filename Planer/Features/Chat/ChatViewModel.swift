@@ -175,8 +175,8 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Verlauf
 
-    /// Lädt die erste Seite der Sitzungsliste. Der Server filtert bereits nach
-    /// dem Source-Tag; die App verwirft fremde Einträge zusätzlich defensiv.
+    /// Lädt die erste Seite der Sitzungsliste. Der Server liefert alle Quellen;
+    /// die App blendet ausschließlich interne Quellen aus (MARAAA-155).
     func loadSessions() async {
         guard !isLoadingSessions else { return }
         isLoadingSessions = true
@@ -187,7 +187,7 @@ final class ChatViewModel: ObservableObject {
                 limit: configuration.sessionPageSize,
                 offset: 0
             )
-            sessions = page.sessions.filter { $0.source == configuration.sessionSource }
+            sessions = page.sessions.filter { configuration.showsSessionSource($0.source) }
             sessionOffset = page.sessions.count
             loadedAllSessions = page.sessions.isEmpty
             syncCurrentSessionWithList()
@@ -216,7 +216,7 @@ final class ChatViewModel: ObservableObject {
             )
             let known = Set(sessions.map(\.id))
             let fresh = page.sessions.filter {
-                $0.source == configuration.sessionSource && !known.contains($0.id)
+                configuration.showsSessionSource($0.source) && !known.contains($0.id)
             }
             sessions.append(contentsOf: fresh)
             sessionOffset += page.sessions.count

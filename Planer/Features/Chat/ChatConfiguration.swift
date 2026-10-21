@@ -21,7 +21,13 @@ struct HermesChatConfiguration: Sendable {
     var sessionsPath = "/api/sessions"
     var approvalPath = "/v1/runs/%@/approval"
     var sessionHeader = "X-Hermes-Session-Id"
+    /// Source-Tag **beim Anlegen** einer Sitzung; die Verlaufsliste filtert
+    /// nicht mehr danach (MARAAA-155).
     var sessionSource = "desktop"
+    /// Interne Quellen, die keine Unterhaltung des Nutzers sind und deshalb
+    /// nicht im Verlauf erscheinen. Alle anderen Quellen — auch unbekannte —
+    /// bleiben sichtbar (MARAAA-155).
+    var hiddenSessionSources: Set<String> = ["cron", "subagent"]
     var eventStreamContentType = "text/event-stream"
 
     // MARK: Zeit und Seiten
@@ -46,6 +52,18 @@ struct HermesChatConfiguration: Sendable {
     var maxToolDetailCharacters = 4_000
     var maxPreviewCharacters = 80
     var maxNoticeCharacters = 300
+
+    // MARK: Verlaufs-Sichtbarkeit
+
+    /// `true`, wenn eine Sitzung dieser Quelle in der Verlaufsliste erscheinen
+    /// darf.
+    ///
+    /// Die **einzige** Stelle, an der die Sichtbarkeit einer Quelle entschieden
+    /// wird. Grenze: reine Prüfung; unbekannte Quellen bleiben sichtbar, damit
+    /// ein neuer Server-Wert nicht stillschweigend verschwindet.
+    func showsSessionSource(_ source: String) -> Bool {
+        !hiddenSessionSources.contains(source)
+    }
 
     // MARK: Basis-URL
 

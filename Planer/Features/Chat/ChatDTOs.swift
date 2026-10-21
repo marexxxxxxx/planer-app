@@ -72,6 +72,24 @@ struct SessionSummary: Identifiable, Decodable, Equatable, Sendable {
     }
 }
 
+extension SessionSummary {
+    /// Kurzes Quellen-Badge der Verlaufsliste („Telegram“, „App“, …).
+    ///
+    /// Die **einzige** Stelle, an der Quellen auf Anzeigetext abgebildet
+    /// werden. Unbekannte Quellen fallen auf den Rohwert zurück, statt
+    /// unsichtbar zu werden (MARAAA-155).
+    var sourceBadge: String {
+        switch source {
+        case "telegram": return "Telegram"
+        case "desktop": return "App"
+        case "dashboard": return "Dashboard"
+        case "api_server": return "API"
+        case "cli": return "CLI"
+        default: return source
+        }
+    }
+}
+
 /// Die Wire-Hülle von `POST /api/sessions` und `GET /api/sessions/{id}`:
 /// `{object, session}`. `object` wird ignoriert.
 ///

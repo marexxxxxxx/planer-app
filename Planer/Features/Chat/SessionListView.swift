@@ -135,10 +135,22 @@ struct SessionListView: View {
 
             Spacer(minLength: DesignTokens.Spacing.s)
 
-            Text("\(session.messageCount)")
-                .font(DesignTokens.Typography.footnote)
-                .foregroundStyle(DesignTokens.Palette.secondaryLabel)
-                .accessibilityLabel(Text("\(session.messageCount) Nachrichten"))
+            VStack(alignment: .trailing, spacing: DesignTokens.Spacing.xs) {
+                // Quelle als kurzes Badge; das Label kommt aus der einen
+                // Zuordnung in `SessionSummary.sourceBadge` (MARAAA-155).
+                Text(session.sourceBadge)
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                    .lineLimit(1)
+                    .padding(.horizontal, DesignTokens.Spacing.xs)
+                    .padding(.vertical, 2)
+                    .background(DesignTokens.Palette.tertiaryBackground, in: Capsule())
+
+                Text("\(session.messageCount)")
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                    .accessibilityLabel(Text("\(session.messageCount) Nachrichten"))
+            }
         }
         .padding(.vertical, DesignTokens.Spacing.xs)
         .contentShape(Rectangle())
@@ -210,6 +222,7 @@ struct SessionListView: View {
 
     private static func accessibilityText(for session: SessionSummary) -> String {
         var parts = [displayTitle(for: session)]
+        parts.append("Quelle: \(session.sourceBadge)")
         if let date = session.lastActiveDate {
             parts.append(relativeText(for: date))
         }
@@ -241,7 +254,7 @@ struct SessionListView: View {
                 lastActive: Date().timeIntervalSince1970 - 86_400,
                 pinned: false,
                 archived: false,
-                source: "desktop"
+                source: "telegram"
             )
         ],
         isLoading: false,
