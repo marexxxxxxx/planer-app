@@ -2,49 +2,11 @@
 //  ChatStreamProvider.swift
 //  Planer
 //
-//  Schmaler Vertrag für LLM-Text-Streaming — der nicht belegte Teil des
-//  Chat-Tabs (spec-ios §9.3).
+//  Vertrag zwischen Chat-Oberfläche und Hermes-Antwortstrom
+//  (spec-chat Rev 4 §9.1, §9.2).
 //
 
 import Foundation
-
-/// Eine Nachricht, wie der Streaming-Anbieter sie sieht.
-///
-/// Zweck: die Chat-Historie in der Form, die ein Chat-Completions-Endpunkt
-/// erwartet — Rolle, Text und optional die Zuordnung zu einem Werkzeugaufruf.
-/// Grenze: kein Anhang, kein Bild, kein `system`-Prompt durch die Oberfläche.
-struct ChatTurn: Equatable, Sendable {
-    enum Role: String, Sendable {
-        case user
-        case assistant
-        case tool
-    }
-
-    let role: Role
-    let content: String
-    /// Nur bei `role == .tool`: die `id` des Aufrufs, dessen Ergebnis das ist.
-    let toolCallID: String?
-    /// Nur bei `role == .tool`: der Werkzeugname.
-    let toolName: String?
-
-    init(role: Role, content: String, toolCallID: String? = nil, toolName: String? = nil) {
-        self.role = role
-        self.content = content
-        self.toolCallID = toolCallID
-        self.toolName = toolName
-    }
-}
-
-/// Ein vollständiger Werkzeugaufruf, den das Modell angefordert hat.
-struct ToolCallRequest: Equatable, Sendable, Identifiable {
-    /// Position im Delta-Strom; ordnet Badge und Ergebnis einander zu.
-    let index: Int
-    /// Aufruf-ID, die als `tool_call_id` zurückgegeben werden muss.
-    let id: String
-    let name: String
-    /// Argumente als JSON-Text — erst der `MCPClient` prüft sie als Objekt.
-    let argumentsJSON: String
-}
 
 /// Herkunft einer Chat-Antwort (spec-voice Rev 2 §7, N7).
 ///
@@ -54,7 +16,7 @@ struct ToolCallRequest: Equatable, Sendable, Identifiable {
 /// Grenze: in V3 liefert nur der Hermes-Anbieter `.hermes`. `.lokal` setzt
 /// erst der Router aus V5.
 enum ChatEngine: String, Equatable, Sendable {
-    /// Antwort von Hermes über den MCP-/Chat-Endpunkt.
+    /// Antwort von Hermes über den Chat-Endpunkt.
     case hermes
     /// Antwort vom lokalen Modell auf dem Gerät (V5).
     case lokal
@@ -72,17 +34,25 @@ enum ChatEngine: String, Equatable, Sendable {
 
 /// Ereignisse, die die Oberfläche kennt.
 ///
-/// Zweck: `ChatView`/`ChatViewModel` reagieren nur auf diese Fälle; der
-/// Dialekt des Anbieters bleibt dahinter.
-/// Grenze: keine Werkzeugausführung. `toolCallFinished` ist eine **Anforderung**
-/// — ausgeführt wird sie über `MCPClient.callTool` (`tools/call`).
+/// Zweck: `ChatView`/`ChatViewModel` reagieren nur auf diese Fälle; der Dialekt
+/// des Servers bleibt dahinter.
+/// Grenze: keine Werkzeugausführung. `toolProgress` beschreibt nur, was der
+/// Server ohnehin tut.
 enum ChatStreamEvent: Equatable, Sendable {
-    case textDelta(String)
-    case toolCallStarted(index: Int, name: String)
-    case toolCallFinished(ToolCallRequest)
-    /// Herkunft der Antwort, vor dem ersten `textDelta` (N7, §7).
+    /// Herkunft, vor dem ersten Delta (N7). In v1 immer `.hermes`.
     case engine(ChatEngine)
-    case finished(reason: String?)
+    /// `choices[0].delta.reasoning_content`
+    case reasoningDelta(String)
+    /// `choices[0].delta.content`
+    case textDelta(String)
+    /// benanntes Ereignis `hermes.tool.progress`
+    case toolProgress(ChatToolProgress)
+    /// benanntes Ereignis `hermes.status` (keine Chat-Zeile)
+    case status(ChatStatusNote)
+    /// benanntes Ereignis `approval.request`
+    case approval(ChatApproval)
+    /// Abschluss-Chunk bzw. `[DONE]`
+    case finished(ChatFinish)
 }
 
 /// Fehler des Streaming-Anbieters.
@@ -90,7 +60,7 @@ enum ChatStreamError: Error, Equatable, LocalizedError {
     case cancelled
     case http(APIError)
     case protocolViolation(String)
-    case invalidArguments(String)
+    case limitExceeded(String)
     case emptyResponse
 
     var errorDescription: String? {
@@ -101,92 +71,73 @@ enum ChatStreamError: Error, Equatable, LocalizedError {
             return error.errorDescription
         case .protocolViolation(let detail):
             return "Antwort nicht lesbar: \(detail)"
-        case .invalidArguments(let detail):
-            return "Werkzeugargumente ungültig: \(detail)"
+        case .limitExceeded(let detail):
+            return detail
         case .emptyResponse:
-            return "Der Chat-Endpunkt hat keine Antwort geliefert."
+            return "Der Server hat keine Antwort geliefert."
         }
     }
 }
 
-/// Der schmale Vertrag zwischen Chat-Oberfläche und Text-Streaming.
+/// Der schmale Vertrag zwischen Chat-Oberfläche und Antwortstrom.
 ///
-/// Zweck: die Oberfläche kennt nur diese Ereignisse; ein anderer Streaming-
-/// Dialekt ist eine andere Implementierung dieses Protokolls — ohne Änderung an
-/// `ChatView` oder `ChatViewModel`.
-/// Grenze: kein Tool-Aufruf, keine MCP-Session und keine Retry-Logik. Tool-Calls
-/// führt der `ChatViewModel` über `MCPClient` aus.
+/// Zweck: die Oberfläche kennt nur diese Ereignisse; ein anderer Dialekt ist
+/// eine andere Implementierung dieses Protokolls — ohne Änderung an `ChatView`
+/// oder `ChatViewModel`.
+/// Grenze: kein Werkzeugaufruf, keine Sitzungsverwaltung und keine Retry-Logik.
 protocol ChatStreamProvider: Sendable {
-    /// Liefert die Antwort als Ereignisfolge. Der Aufrufer bricht über
-    /// `Task.cancel()` ab; die Implementierung beendet den Strom dann mit
+    /// Streamt die Antwort auf genau einen neuen User-Turn in einer bestehenden
+    /// Sitzung. Der Body trägt **nur** diesen Turn; die Historie lädt der Server
+    /// aus seiner Datenbank. Abbruch über `Task.cancel()` →
     /// `ChatStreamError.cancelled`.
-    func stream(messages: [ChatTurn], tools: [MCPTool]) -> AsyncThrowingStream<ChatStreamEvent, Error>
+    func stream(sessionID: String, userText: String) -> AsyncThrowingStream<ChatStreamEvent, Error>
 }
 
-/// `[ANNAHME]` — OpenAI-kompatibler Streaming-Dialekt.
-///
-/// **Nicht belegt:** spec-ios §9.3 (F-Hermes-Streaming) stellt ausdrücklich
-/// fest, dass MCP kein LLM-Text-Streaming standardisiert und das Format des
-/// Hermes-Agenten offen ist. Diese Implementierung unterstellt deshalb:
-///
-/// - Endpunkt `POST /v1/chat/completions` (relativ zur Hermes-Basis-URL),
-/// - Modellkennung `hermes`,
-/// - SSE-Ereignisse mit `choices[0].delta.content` und
-///   `choices[0].delta.tool_calls` (`id`, `function.name`,
-///   `function.arguments`), Abschluss über `[DONE]` oder `finish_reason`.
-///
-/// Beides ist im Code als `[ANNAHME]` markiert. Antwortet Hermes anders, wird
-/// **nur diese Datei** ersetzt: `ChatView`, `ChatViewModel` und `MCPClient`
-/// bleiben unverändert, weil sie ausschließlich `ChatStreamProvider` bzw.
-/// `ChatStreamEvent` kennen. Bis zur Auftraggeber-Antwort gilt der Dialekt als
-/// Annahme — nicht als Vertrag.
-struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
-
-    struct Configuration: Sendable {
-        /// `[ANNAHME]` Pfad des Chat-Endpunkts; belegt ist nur der MCP-Kern.
-        var endpointPath = "/v1/chat/completions"
-
-        /// `[ANNAHME]` Modellkennung. Muss der Auftraggeber an Hermes anpassen.
-        var modelIdentifier = "hermes"
-
-        /// Zeitlimit des Stroms. Ein Chat darf länger dauern als ein Sync-Lauf.
-        var streamTimeout: TimeInterval = 120
-
-        /// So viele Nachrichten der Historie werden gesendet (älteste fallen weg).
-        var maxHistoryTurns = 24
-
-        /// Obergrenze der Werkzeug-Definitionen je Anfrage.
-        var maxTools = 64
-
-        /// Obergrenze des gestreamten Textes einer Antwort.
-        var maxDeltaCharacters = 24_000
-
-        /// Obergrenze einer gepufferten JSON-Antwort (Nicht-Stream-Fallback).
-        var maxJSONBodyBytes = 1_048_576
+/// Body von `POST /v1/chat/completions` — genau ein User-Turn, kein Modell,
+/// keine Werkzeuge, keine Historie.
+struct ChatRequestBody: Encodable, Sendable {
+    struct Message: Encodable, Sendable {
+        let role: String
+        let content: String
     }
 
-    private let urlSession: URLSession
-    private let keychain: KeychainManager
-    private let settings: Configuration
+    let messages: [Message]
+    let stream: Bool
+}
+
+/// Der Hermes-Antwortstrom.
+struct HermesChatStreamProvider: ChatStreamProvider {
+
+    /// Obergrenze einer gepufferten JSON-Antwort (Nicht-Stream-Fallback).
+    private static let maxJSONBodyBytes = 1_048_576
+    /// Obergrenze des Fehlertextes aus einer Nicht-2xx-Antwort.
+    private static let maxErrorBodyBytes = 4_096
+
+    private let configuration: HermesChatConfiguration
+    /// Der Strom-Client trägt `streamIdleTimeout`, nie den 10-s-Default des
+    /// `NetworkClient`. Genau eine Instanz, einmal in `init` gebaut.
+    private let client: NetworkClient
 
     init(
-        urlSession: URLSession = .shared,
-        keychain: KeychainManager = KeychainManager(),
-        settings: Configuration = Configuration()
+        configuration: HermesChatConfiguration = HermesChatConfiguration(),
+        networkClient: NetworkClient? = nil
     ) {
-        self.urlSession = urlSession
-        self.keychain = keychain
-        self.settings = settings
+        self.configuration = configuration
+        self.client = networkClient ?? NetworkClient(timeout: configuration.streamIdleTimeout)
     }
 
     func stream(
-        messages: [ChatTurn],
-        tools: [MCPTool]
+        sessionID: String,
+        userText: String
     ) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    try await run(messages: messages, tools: tools, continuation: continuation)
+                    try await run(
+                        sessionID: sessionID,
+                        userText: userText,
+                        continuation: continuation
+                    )
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -201,28 +152,26 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
     // MARK: Ausführung
 
     private func run(
-        messages: [ChatTurn],
-        tools: [MCPTool],
+        sessionID: String,
+        userText: String,
         continuation: AsyncThrowingStream<ChatStreamEvent, Error>.Continuation
     ) async throws {
         // Request und Header kommen aus dem `NetworkClient` — dieselbe Kette wie
-        // jeder andere Dienst und damit genau eine Header-Injektion (spec-ios §8-1).
-        let networkClient = NetworkClient(
-            session: urlSession,
-            timeout: settings.streamTimeout,
-            keychain: keychain
-        )
+        // jeder andere Dienst und damit genau eine Header-Injektion.
         let request = APIRequest(
             method: .post,
-            path: settings.endpointPath,
-            body: try encodeBody(messages: messages, tools: tools),
-            accept: MCPProtocol.eventStreamContentType + ", application/json",
-            headers: ["Content-Type": "application/json"]
+            path: configuration.chatPath,
+            body: try makeChatRequestBody(userText: userText),
+            accept: configuration.eventStreamContentType + ", application/json",
+            headers: [
+                configuration.sessionHeader: sessionID,
+                "Content-Type": "application/json"
+            ]
         )
 
         let stream: StreamingResponse
         do {
-            stream = try await networkClient.stream(request, for: .hermes)
+            stream = try await client.stream(request, for: .hermes)
         } catch let error as APIError {
             if error == .cancelled {
                 throw ChatStreamError.cancelled
@@ -235,7 +184,7 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
         let http = stream.response
         let bytes = stream.bytes
         guard (200..<300).contains(http.statusCode) else {
-            let body = (try? await HermesHTTP.collect(bytes, limit: 4_096)) ?? Data()
+            let body = (try? await HermesHTTP.collect(bytes, limit: Self.maxErrorBodyBytes)) ?? Data()
             throw ChatStreamError.http(
                 APIError.from(
                     status: http.statusCode,
@@ -245,59 +194,35 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
             )
         }
 
-        // N7: die Herkunft steht fest, bevor der erste Text ankommt (§7).
+        // N7: die Herkunft steht fest, bevor der erste Text ankommt.
         continuation.yield(.engine(.hermes))
 
-        if HermesHTTP.isEventStream(http) {
+        if HermesHTTP.isEventStream(
+            http,
+            eventStreamContentType: configuration.eventStreamContentType
+        ) {
             try await consumeEventStream(bytes, continuation: continuation)
         } else {
             // Ein Server, der trotz `stream: true` ein JSON-Objekt liefert, ist
             // kein Fehler: die Antwort wird als ein Stück ausgegeben.
-            let body = try await HermesHTTP.collect(bytes, limit: settings.maxJSONBodyBytes)
+            let body = try await HermesHTTP.collect(bytes, limit: Self.maxJSONBodyBytes)
             try emit(responseBody: body, continuation: continuation)
         }
     }
 
     // MARK: Anfrage
 
-    private func encodeBody(messages: [ChatTurn], tools: [MCPTool]) throws -> Data {
-        let turns = messages.suffix(max(1, settings.maxHistoryTurns))
-        var payload: [String: JSONValue] = [
-            "model": .string(settings.modelIdentifier),
-            "stream": .bool(true),
-            "messages": .array(turns.map { Self.encode(turn: $0) })
-        ]
-        if !tools.isEmpty {
-            payload["tools"] = .array(tools.prefix(settings.maxTools).map { tool in
-                .object([
-                    "type": .string("function"),
-                    "function": .object([
-                        "name": .string(tool.name),
-                        "description": .string(tool.description ?? tool.title ?? ""),
-                        "parameters": tool.inputSchema
-                    ])
-                ])
-            })
-        }
+    /// Baut den Body aus **einem** User-Turn. Die Historie lädt der Server.
+    private func makeChatRequestBody(userText: String) throws -> Data {
+        let body = ChatRequestBody(
+            messages: [ChatRequestBody.Message(role: "user", content: userText)],
+            stream: true
+        )
         do {
-            return try JSONEncoder().encode(JSONValue.object(payload))
+            return try JSONEncoder().encode(body)
         } catch {
             throw ChatStreamError.protocolViolation("Chat-Anfrage nicht serialisierbar.")
         }
-    }
-
-    private static func encode(turn: ChatTurn) -> JSONValue {
-        var object: [String: JSONValue] = [
-            "role": .string(turn.role.rawValue),
-            "content": .string(turn.content)
-        ]
-        if let toolCallID = turn.toolCallID {
-            object["tool_call_id"] = .string(toolCallID)
-        }
-        if let toolName = turn.toolName {
-            object["name"] = .string(toolName)
-        }
-        return .object(object)
     }
 
     // MARK: Ereignisse
@@ -307,43 +232,59 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
         continuation: AsyncThrowingStream<ChatStreamEvent, Error>.Continuation
     ) async throws {
         var decoder = ServerSentEventDecoder()
-        var pending: [Int: PendingToolCall] = [:]
         var finishReason: String?
+        var errorMessage: String?
         var characters = 0
-        var receivedEvent = false
+        // F8: nur echter Inhalt zählt — der Rollen-Chunk ist inhaltslos.
+        var sawContent = false
 
         for try await line in bytes.lines {
             try Task.checkCancellation()
             guard let event = try decoder.consume(line: line) else { continue }
             let payload = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !payload.isEmpty else { continue }
+
+            if let name = event.event, !name.isEmpty {
+                try emit(named: name, payload: payload, continuation: continuation)
+                continue
+            }
+
             if payload == "[DONE]" {
                 break
             }
-            receivedEvent = true
             guard let data = payload.data(using: .utf8) else { continue }
 
             let chunk: ChatCompletionChunk
             do {
                 chunk = try Self.decoder.decode(ChatCompletionChunk.self, from: data)
             } catch {
-                // `[ANNAHME]`-Dialekt nicht erfüllt: laut scheitern, nicht still
-                // weiterlaufen und eine leere Antwort als Erfolg verkaufen.
+                // F18: laut scheitern, nicht still weiterlaufen und eine leere
+                // Antwort als Erfolg verkaufen.
                 throw ChatStreamError.protocolViolation(
-                    "Stream-Ereignis entspricht nicht dem [ANNAHME]-Dialekt (choices[0].delta)."
+                    "Stream-Ereignis entspricht nicht dem Hermes-Vertrag (choices[0].delta)."
                 )
             }
 
-            guard let choice = chunk.choices.first else { continue }
-            if let delta = choice.delta?.content, !delta.isEmpty {
-                characters += delta.count
-                guard characters <= settings.maxDeltaCharacters else {
-                    throw ChatStreamError.protocolViolation("Antwort überschreitet das Zeichenlimit.")
-                }
-                continuation.yield(.textDelta(delta))
+            if let message = chunk.error?.message, !message.isEmpty {
+                errorMessage = message
             }
-            for toolCallDelta in choice.delta?.toolCalls ?? [] {
-                absorb(toolCallDelta, into: &pending, continuation: continuation)
+
+            guard let choice = chunk.choices.first else { continue }
+            if let reasoning = choice.delta?.reasoningContent, !reasoning.isEmpty {
+                sawContent = true
+                characters += reasoning.count
+                guard characters <= configuration.maxTextCharacters else {
+                    throw ChatStreamError.limitExceeded("Antwort überschreitet das Zeichenlimit.")
+                }
+                continuation.yield(.reasoningDelta(reasoning))
+            }
+            if let content = choice.delta?.content, !content.isEmpty {
+                sawContent = true
+                characters += content.count
+                guard characters <= configuration.maxTextCharacters else {
+                    throw ChatStreamError.limitExceeded("Antwort überschreitet das Zeichenlimit.")
+                }
+                continuation.yield(.textDelta(content))
             }
             if let reason = choice.finishReason, !reason.isEmpty {
                 finishReason = reason
@@ -351,66 +292,50 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
         }
 
         try Task.checkCancellation()
-        guard receivedEvent else {
+
+        // F12: ein Fehler hat Vorrang vor der Leer-Prüfung; der Teilstand bleibt.
+        if finishReason == "error" {
+            continuation.yield(
+                .finished(ChatFinish(reason: finishReason, errorMessage: errorMessage))
+            )
+            return
+        }
+        // F8: kein Inhalt angekommen — das ist ein Fehler, kein leerer Erfolg.
+        guard sawContent else {
             throw ChatStreamError.emptyResponse
         }
-
-        for (index, call) in pending.sorted(by: { $0.key < $1.key }) {
-            try emit(toolCall: call, index: index, continuation: continuation)
-        }
-        continuation.yield(.finished(reason: finishReason))
+        continuation.yield(
+            .finished(ChatFinish(reason: finishReason, errorMessage: errorMessage))
+        )
     }
 
-    private func absorb(
-        _ delta: ToolCallDelta,
-        into pending: inout [Int: PendingToolCall],
-        continuation: AsyncThrowingStream<ChatStreamEvent, Error>.Continuation
-    ) {
-        let index = delta.index ?? 0
-        var call = pending[index] ?? PendingToolCall()
-
-        if let identifier = delta.id, !identifier.isEmpty {
-            call.identifier = identifier
-        }
-        if let name = delta.function?.name, !name.isEmpty, name != call.name {
-            let isFirstAnnouncement = call.name.isEmpty
-            call.name = name
-            if isFirstAnnouncement {
-                continuation.yield(.toolCallStarted(index: index, name: name))
-            }
-        }
-        if let fragment = delta.function?.arguments {
-            call.arguments += fragment
-        }
-        pending[index] = call
-    }
-
+    /// Wertet ein benanntes SSE-Ereignis aus. Unbekannte Namen werden
+    /// ignoriert (F17), der Strom läuft weiter.
     private func emit(
-        toolCall call: PendingToolCall,
-        index: Int,
+        named name: String,
+        payload: String,
         continuation: AsyncThrowingStream<ChatStreamEvent, Error>.Continuation
     ) throws {
-        guard !call.name.isEmpty else { return }
-        let identifier = call.identifier.isEmpty ? "call_\(index)" : call.identifier
-        let rawArguments = call.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
-        let argumentsJSON = rawArguments.isEmpty ? "{}" : rawArguments
-        guard let data = argumentsJSON.data(using: .utf8),
-              (try? JSONDecoder().decode(JSONValue.self, from: data)) != nil
-        else {
-            throw ChatStreamError.invalidArguments(
-                "Werkzeug \(call.name) hat kein gültiges JSON als Argumente."
-            )
+        guard let data = payload.data(using: .utf8) else { return }
+        switch name {
+        case "hermes.tool.progress":
+            guard let progress = try? Self.decoder.decode(ChatToolProgress.self, from: data) else {
+                throw ChatStreamError.protocolViolation("Werkzeug-Ereignis nicht lesbar.")
+            }
+            continuation.yield(.toolProgress(progress))
+        case "hermes.status":
+            guard let note = try? Self.decoder.decode(ChatStatusNote.self, from: data) else {
+                throw ChatStreamError.protocolViolation("Status-Ereignis nicht lesbar.")
+            }
+            continuation.yield(.status(note))
+        case "approval.request":
+            guard let approval = try? Self.decoder.decode(ChatApproval.self, from: data) else {
+                throw ChatStreamError.protocolViolation("Freigabe-Ereignis nicht lesbar.")
+            }
+            continuation.yield(.approval(approval))
+        default:
+            return
         }
-        continuation.yield(
-            .toolCallFinished(
-                ToolCallRequest(
-                    index: index,
-                    id: identifier,
-                    name: call.name,
-                    argumentsJSON: argumentsJSON
-                )
-            )
-        )
     }
 
     /// Fallback für eine vollständige JSON-Antwort (`application/json`).
@@ -428,46 +353,49 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
             throw ChatStreamError.emptyResponse
         }
 
+        var sawContent = false
+        if let reasoning = choice.message?.reasoningContent, !reasoning.isEmpty {
+            sawContent = true
+            continuation.yield(
+                .reasoningDelta(String(reasoning.prefix(configuration.maxReasoningCharacters)))
+            )
+        }
         if let text = choice.message?.content, !text.isEmpty {
-            continuation.yield(.textDelta(String(text.prefix(settings.maxDeltaCharacters))))
+            sawContent = true
+            continuation.yield(.textDelta(String(text.prefix(configuration.maxTextCharacters))))
         }
 
-        var pending: [Int: PendingToolCall] = [:]
-        for (offset, toolCall) in (choice.message?.toolCalls ?? []).enumerated() {
-            let index = toolCall.index ?? offset
-            var call = PendingToolCall()
-            call.identifier = toolCall.id ?? ""
-            call.name = toolCall.function?.name ?? ""
-            call.arguments = toolCall.function?.arguments ?? "{}"
-            pending[index] = call
+        let errorMessage = response.error?.message
+        if choice.finishReason == "error" {
+            continuation.yield(
+                .finished(ChatFinish(reason: choice.finishReason, errorMessage: errorMessage))
+            )
+            return
         }
-        for (index, call) in pending.sorted(by: { $0.key < $1.key }) {
-            if !call.name.isEmpty {
-                continuation.yield(.toolCallStarted(index: index, name: call.name))
-            }
-            try emit(toolCall: call, index: index, continuation: continuation)
+        guard sawContent else {
+            throw ChatStreamError.emptyResponse
         }
-        continuation.yield(.finished(reason: choice.finishReason))
+        continuation.yield(
+            .finished(ChatFinish(reason: choice.finishReason, errorMessage: errorMessage))
+        )
     }
 
-    // MARK: Wire-Typen (`[ANNAHME]`)
+    // MARK: Wire-Typen
 
-    private struct PendingToolCall {
-        var identifier = ""
-        var name = ""
-        var arguments = ""
-    }
-
-    /// Ein SSE-Ereignis des `[ANNAHME]`-Dialekts.
+    /// Ein SSE-Ereignis des Chat-Completions-Dialekts (unbenannter Frame).
     private struct ChatCompletionChunk: Decodable {
+        struct ErrorDetail: Decodable {
+            let message: String?
+        }
+
         struct Choice: Decodable {
             struct Delta: Decodable {
                 let content: String?
-                let toolCalls: [ToolCallDelta]?
+                let reasoningContent: String?
 
                 enum CodingKeys: String, CodingKey {
                     case content
-                    case toolCalls = "tool_calls"
+                    case reasoningContent = "reasoning_content"
                 }
             }
 
@@ -481,30 +409,23 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
         }
 
         let choices: [Choice]
-    }
-
-    /// Ein Delta eines Werkzeugaufrufs: `id`, `function.name`, `function.arguments`.
-    private struct ToolCallDelta: Decodable {
-        struct Function: Decodable {
-            let name: String?
-            let arguments: String?
-        }
-
-        let index: Int?
-        let id: String?
-        let function: Function?
+        let error: ErrorDetail?
     }
 
     /// Eine vollständige (nicht gestreamte) Antwort desselben Dialekts.
     private struct ChatCompletionResponse: Decodable {
+        struct ErrorDetail: Decodable {
+            let message: String?
+        }
+
         struct Choice: Decodable {
             struct Message: Decodable {
                 let content: String?
-                let toolCalls: [ToolCallDelta]?
+                let reasoningContent: String?
 
                 enum CodingKeys: String, CodingKey {
                     case content
-                    case toolCalls = "tool_calls"
+                    case reasoningContent = "reasoning_content"
                 }
             }
 
@@ -518,6 +439,7 @@ struct OpenAICompatibleChatStreamProvider: ChatStreamProvider {
         }
 
         let choices: [Choice]
+        let error: ErrorDetail?
     }
 
     private static let decoder = JSONDecoder()

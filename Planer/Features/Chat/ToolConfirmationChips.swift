@@ -23,19 +23,19 @@ struct ToolConfirmationChips: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
-            Text(ToolCallPolicy.prompt(for: toolName))
+            Text("Hermes möchte „\(toolName)“ ausführen. Das kann Daten verändern.")
                 .font(DesignTokens.Typography.footnote)
                 .foregroundStyle(DesignTokens.Palette.secondaryLabel)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: DesignTokens.Spacing.s) {
-                Button(ToolCallPolicy.approveTitle, action: onApprove)
+                Button("Ausführen", action: onApprove)
                     .buttonStyle(.borderedProminent)
                     .accessibilityLabel(
                         Text("Werkzeug \(toolName) ausführen")
                     )
 
-                Button(ToolCallPolicy.declineTitle, action: onDecline)
+                Button("Ablehnen", action: onDecline)
                     .buttonStyle(.bordered)
                     .accessibilityLabel(
                         Text("Werkzeug \(toolName) ablehnen")
