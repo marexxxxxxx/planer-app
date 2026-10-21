@@ -50,7 +50,7 @@ planer-app/
 │   │   ├── Todos/   TodosView, TodosViewModel, TodoRepository, TodoEditorSheet
 │   │   ├── Grocy/   GrocyView, GrocyViewModel, GrocyRepository, GrocyDTO
 │   │   └── Mealie/  MealieView, MealieViewModel, MealieRepository, MealieDTO
-│   ├── Networking/  NetworkClient, RetryPolicy, APIError, ServiceConfiguration
+│   ├── Networking/  NetworkClient, HermesSession, RetryPolicy, APIError, ServiceConfiguration, ServiceType
 │   ├── Keychain/    KeychainManager
 │   ├── Cache/       ModelContainer, Syncable, Entities
 │   └── Settings/    SettingsView, AppLockSection, ServiceSettingsSection
@@ -86,6 +86,37 @@ App-Lock-Gate (Sperr-Oberfläche + `LocalAuthentication`) vor die Tabs.
 maschinenlesbare Spiegelung derselben Werte. Beide werden **nur gemeinsam**
 geändert. Farben sind iOS-Systemfarben (Light/Dark automatisch); der Akzent ist
 ein Platzhalter in `Assets.xcassets/AccentColor.colorset` und im JSON vermerkt.
+
+## Auth
+
+Jeder Request trägt die Cloudflare-Access-Header
+`CF-Access-Client-Id`/`CF-Access-Client-Secret`; gesetzt werden sie
+ausschließlich in `NetworkClient.injectHeaders`. Mealie nutzt zusätzlich
+`Authorization: Bearer <api_token>`, Grocy `GROCY-API-KEY`, das Dashboard keinen
+Header.
+
+Hermes nutzt **keinen** Bearer mehr. Die App meldet sich mit dem
+Password-Login an:
+
+```
+POST /auth/password-login
+Content-Type: application/json
+
+{"provider":"basic","username":"…","password":"…"}
+```
+
+Die Antwort `{"ok":true,"next":"/"}` bringt `Set-Cookie`-Session-Cookies. Sie
+liegen nur im Prozessspeicher (`HermesCookieJar`) und werden bei jedem
+folgenden Hermes-Request — auch beim Chat-Stream — als `Cookie`-Header
+gesendet. Antwortet Hermes mit 401 und `reason` `no_cookie`/
+`invalid_or_expired_session` bzw. `error` `session_expired`/`unauthenticated`,
+loggt sich die App genau einmal neu ein, übernimmt die neuen Cookies und
+wiederholt den Request einmal. Ein erneuter 401 wird als Fehler gemeldet.
+
+In den Einstellungen stehen für Hermes `Benutzername` und `Passwort`
+(SecureField); beide werden über `KeychainManager` gespeichert, ein leeres
+Feld löscht den Eintrag. Mealie, Grocy und Dashboard behalten ihre bisherigen
+Token-Felder. Es gibt keine Secrets im Repo und keine `UserDefaults`-Ablage.
 
 ## Statische Abnahme
 

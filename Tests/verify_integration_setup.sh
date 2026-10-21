@@ -86,8 +86,16 @@ require "das Anhängen prüft das /api-Ende" \
 # Der Hermes-Zweig darf den Pfad nicht mehr pauschal leeren (MARAAA-142):
 # ein abschließendes `/api` wird entfernt, jeder andere Pfad abgelehnt. Der
 # Ausschnitt reicht vom `case .hermes:` bis zum Ende des switch-Blocks.
-hermes_branch="$(awk '/case \.hermes:/{flag=1} flag{print} flag && /^        }/{exit}' \
-    "$configuration")" || true
+# Präzisierung MARAAA-146: `ServiceConfiguration.load` hat jetzt ebenfalls
+# einen `case .hermes:`-Zweig (Username/Passwort statt API-Token). Damit der
+# Ausschnitt weiterhin den Normalisierungs-Zweig trifft, beginnt er erst in
+# `normalizeBaseURL`; die Erwartung selbst bleibt unverändert.
+hermes_branch="$(awk '
+    /static func normalizeBaseURL/ { in_function = 1 }
+    in_function && /case \.hermes:/ { flag = 1 }
+    flag { print }
+    flag && /^        }/ { exit }
+' "$configuration")" || true
 if [[ -n "$hermes_branch" ]] && grep -qE 'if path == "/api" \{' <<<"$hermes_branch"; then
     pass "Hermes entfernt nur ein abschließendes /api"
 else

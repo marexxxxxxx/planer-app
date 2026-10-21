@@ -531,7 +531,9 @@ final class ChatViewModel: ObservableObject {
         case .server(let status, _, _, _):
             return status >= 500
         case .unauthorized, .forbidden, .notFound, .conflict,
-             .rateLimited, .cancelled, .emptyResponse:
+             .rateLimited, .cancelled, .emptyResponse, .hermesLoginFailed:
+            // Eine abgelehnte Hermes-Anmeldung behält ihre eigene Meldung und
+            // wird nicht als „Sitzung nicht anlegbar“ umgeschrieben.
             return false
         case .validation:
             // F9: 400 `invalid_title` wird wie F10 abgebrochen (gleicher Text);
@@ -1059,8 +1061,9 @@ final class ChatViewModel: ObservableObject {
 
     private static func describe(_ error: APIError) -> String {
         switch error {
-        case .unauthorized:
-            return "Hermes verlangt einen API-Key. Bitte in den Einstellungen hinterlegen."
+        case .unauthorized, .hermesLoginFailed:
+            // Hermes meldet sich seit MARAAA-146 mit Benutzername/Passwort an.
+            return "Hermes verweigert den Zugriff. Bitte Benutzername und Passwort in den Einstellungen prüfen."
         case .forbidden:
             return "Zugriff verweigert (403). Der Server erlaubt keine Sitzungs-Fortsetzung."
         case .notFound:

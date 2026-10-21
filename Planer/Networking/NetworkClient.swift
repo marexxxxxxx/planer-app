@@ -54,8 +54,9 @@ struct APIRequest {
 ///
 /// Zweck: `text/event-stream` (MCP, Chat) aus derselben Request-Kette lesen,
 /// die auch `send` nutzt — inklusive der einen Header-Injektion.
-/// Grenze: kein Retry und keine Statusprüfung; beides entscheidet der Aufrufer,
-/// weil ein Fehlertext im Strom stehen kann.
+/// Grenze: keine Statusprüfung; die entscheidet der Aufrufer, weil ein
+/// Fehlertext im Strom stehen kann. Einzige Ausnahme ist der Hermes-401, den
+/// `stream` für den Re-Login selbst liest.
 struct StreamingResponse {
     let bytes: URLSession.AsyncBytes
     let response: HTTPURLResponse
@@ -75,9 +76,11 @@ struct NetworkClient {
     /// Request-Timeout in Sekunden (spec-ios §10: 10 s, konfiguriert).
     private let timeout: TimeInterval
     private let keychain: KeychainManager
+    /// Obergrenze des 401-Bodys, aus dem der Re-Login-Grund gelesen wird.
+    private static let maxAuthBodyBytes = 4_096
 
     init(
-        session: URLSession = .shared,
+        session: URLSession = NetworkClient.cookieFreeSession,
         retryPolicy: RetryPolicy = .default,
         timeout: TimeInterval = 10,
         keychain: KeychainManager = KeychainManager()
@@ -92,7 +95,12 @@ struct NetworkClient {
     func send(_ request: APIRequest, for service: ServiceType) async throws -> Data {
         let configuration = try loadConfiguration(for: service)
         let urlRequest = try makeURLRequest(request, configuration: configuration)
-        return try await perform(urlRequest, attempt: 1)
+        return try await perform(
+            urlRequest,
+            service: service,
+            configuration: configuration,
+            attempt: 1
+        )
     }
 
     /// Führt den Request aus und liefert Rohdaten plus HTTP-Kopf.
@@ -109,7 +117,12 @@ struct NetworkClient {
     ) async throws -> (data: Data, response: HTTPURLResponse) {
         let configuration = try loadConfiguration(for: service)
         let urlRequest = try makeURLRequest(request, configuration: configuration)
-        return try await performRaw(urlRequest, attempt: 1)
+        return try await performRaw(
+            urlRequest,
+            service: service,
+            configuration: configuration,
+            attempt: 1
+        )
     }
 
     /// Führt den Request aus und decodiert die Antwort als `Response`.
@@ -134,19 +147,59 @@ struct NetworkClient {
     /// Zweck: `text/event-stream` lesen zu können, ohne die sicherheitsrelevante
     /// Header-Injektion ein zweites Mal zu implementieren. Der Request wird über
     /// dieselbe `makeURLRequest`/`injectHeaders`-Kette gebaut wie bei `send`.
-    /// Grenze: **kein automatischer Retry** — ein Strom wird nicht wiederholt;
-    /// die aufrufende Schicht entscheidet. Nicht-2xx-Antworten werden nicht
-    /// geworfen, weil der Fehlertext im Strom stehen kann: der Aufrufer prüft
-    /// `response.statusCode` und liest den Body begrenzt.
+    /// Grenze: **kein automatischer Retry** im Sinne von `send` — ein Strom
+    /// wird nicht wiederholt; die aufrufende Schicht entscheidet. Ausnahme ist
+    /// die Hermes-Sitzung (MARAAA-146): ein 401 mit abgelaufenen Cookies löst
+    /// genau einen Re-Login und eine Wiederholung aus. Andere Nicht-2xx-
+    /// Antworten werden nicht geworfen, weil der Fehlertext im Strom stehen
+    /// kann: der Aufrufer prüft `response.statusCode` und liest den Body
+    /// begrenzt. Nur ein Hermes-401 muss dafür vorher gelesen werden.
     func stream(_ request: APIRequest, for service: ServiceType) async throws -> StreamingResponse {
         let configuration = try loadConfiguration(for: service)
         let urlRequest = try makeURLRequest(request, configuration: configuration)
+        return try await performStream(
+            urlRequest,
+            service: service,
+            configuration: configuration,
+            didRelogin: false
+        )
+    }
 
+    private func performStream(
+        _ urlRequest: URLRequest,
+        service: ServiceType,
+        configuration: ServiceConfiguration,
+        didRelogin: Bool
+    ) async throws -> StreamingResponse {
         do {
             let (bytes, response) = try await session.bytes(for: urlRequest)
             guard let http = response as? HTTPURLResponse else {
                 throw APIError.invalidResponse
             }
+
+            // Der 401-Body entscheidet über den Re-Login und muss dafür aus dem
+            // Strom gelesen werden. Das betrifft ausschließlich Hermes; alle
+            // anderen Antworten bleiben ungepuffert.
+            if service == .hermes, http.statusCode == 401 {
+                let body = (try? await Self.collect(bytes, limit: Self.maxAuthBodyBytes)) ?? Data()
+                if !didRelogin, HermesAuthFailure.indicatesExpiredSession(body) {
+                    try await loginHermes(configuration: configuration)
+                    var retried = urlRequest
+                    injectHermesCookies(into: &retried)
+                    return try await performStream(
+                        retried,
+                        service: service,
+                        configuration: configuration,
+                        didRelogin: true
+                    )
+                }
+                throw APIError.from(
+                    status: http.statusCode,
+                    body: body,
+                    retryAfter: Self.retryAfter(from: http)
+                )
+            }
+
             return StreamingResponse(bytes: bytes, response: http)
         } catch let error as URLError {
             switch error.code {
@@ -218,9 +271,11 @@ struct NetworkClient {
 
     /// Einzige Stelle der Authentifizierungs-Header (spec-ios §8, Review-Check 1).
     ///
-    /// Cloudflare Access gilt für alle Dienste; `Authorization: Bearer` nur für
-    /// Hermes/Mealie, `GROCY-API-KEY` nur für Grocy, das Dashboard hat keinen
-    /// API-Token (spec-ios §2.2).
+    /// Cloudflare Access gilt für alle Dienste. Mealie nutzt seinen API-Token,
+    /// Grocy seinen API-Key, das Dashboard keinen. Hermes setzt seit
+    /// MARAAA-146 keinen `Authorization`-Header mehr: dort authentifizieren
+    /// die Cloudflare-Header den Dienst und die Password-Login-Cookies die
+    /// Sitzung. Auch der Login-Request läuft durch diese Injektion.
     private func injectHeaders(
         into request: inout URLRequest,
         accept: String,
@@ -233,16 +288,32 @@ struct NetworkClient {
             request.setValue(clientSecret, forHTTPHeaderField: "CF-Access-Client-Secret")
         }
         switch configuration.service {
-        case .hermes, .mealie:
+        case .mealie:
             if let token = configuration.apiToken {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
+        case .hermes:
+            injectHermesCookies(into: &request)
         case .grocy:
             if let key = configuration.apiKey {
                 request.setValue(key, forHTTPHeaderField: "GROCY-API-KEY")
             }
         case .dashboard:
             break
+        }
+    }
+
+    /// Setzt den `Cookie`-Header aus dem Prozessspeicher der Hermes-Session.
+    ///
+    /// Der Header entsteht über `HTTPCookie.requestHeaderFields(with:)` aus den
+    /// gespeicherten Cookies — kein fester String, kein alter Stand nach einem
+    /// Re-Login. Ohne Cookies bleibt der Request cookiefrei.
+    private func injectHermesCookies(into request: inout URLRequest) {
+        let fields = HermesCookieJar.shared.requestHeaderFields()
+        if let cookie = fields["Cookie"], !cookie.isEmpty {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        } else {
+            request.setValue(nil, forHTTPHeaderField: "Cookie")
         }
     }
 
@@ -256,8 +327,18 @@ struct NetworkClient {
         }
     }
 
-    private func perform(_ request: URLRequest, attempt: Int) async throws -> Data {
-        let result = try await performRaw(request, attempt: attempt)
+    private func perform(
+        _ request: URLRequest,
+        service: ServiceType,
+        configuration: ServiceConfiguration,
+        attempt: Int
+    ) async throws -> Data {
+        let result = try await performRaw(
+            request,
+            service: service,
+            configuration: configuration,
+            attempt: attempt
+        )
         guard (200..<300).contains(result.response.statusCode) else {
             throw APIError.from(
                 status: result.response.statusCode,
@@ -272,10 +353,15 @@ struct NetworkClient {
     /// Rohantwort — auch Nicht-2xx, damit `sendRaw` den Body auswerten kann.
     ///
     /// Wiederholt werden Transportfehler sowie 429 und retryable 5xx; die
-    /// Methodenprüfung liegt in `waitBeforeRetry`.
+    /// Methodenprüfung liegt in `waitBeforeRetry`. Zusätzlich behandelt genau
+    /// der Hermes-Zweig einen 401 mit abgelaufenen Cookies: `didRelogin`
+    /// begrenzt den Re-Login auf einen Versuch (MARAAA-146).
     private func performRaw(
         _ request: URLRequest,
-        attempt: Int
+        service: ServiceType,
+        configuration: ServiceConfiguration,
+        attempt: Int,
+        didRelogin: Bool = false
     ) async throws -> (data: Data, response: HTTPURLResponse) {
         // Der Netzwerkaufruf steht bewusst allein im do-Block: Fehler aus
         // `waitBeforeRetry` dürfen nicht erneut von diesem catch abgefangen
@@ -291,7 +377,13 @@ struct NetworkClient {
             guard try await waitBeforeRetry(mapped, request: request, attempt: attempt) else {
                 throw mapped
             }
-            return try await performRaw(request, attempt: attempt + 1)
+            return try await performRaw(
+                request,
+                service: service,
+                configuration: configuration,
+                attempt: attempt + 1,
+                didRelogin: didRelogin
+            )
         } catch is CancellationError {
             throw APIError.cancelled
         } catch {
@@ -302,6 +394,26 @@ struct NetworkClient {
         guard let http = result.response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
+
+        // MARAAA-146: Ein Hermes-401 mit abgelaufener Sitzung wird genau einmal
+        // durch einen neuen Password-Login und eine Wiederholung ersetzt. Jeder
+        // andere 401 (auch der zweite nach dem Re-Login) bleibt ein Fehler.
+        if service == .hermes,
+           http.statusCode == 401,
+           !didRelogin,
+           HermesAuthFailure.indicatesExpiredSession(result.data) {
+            try await loginHermes(configuration: configuration)
+            var retried = request
+            injectHermesCookies(into: &retried)
+            return try await performRaw(
+                retried,
+                service: service,
+                configuration: configuration,
+                attempt: attempt,
+                didRelogin: true
+            )
+        }
+
         guard !(200..<300).contains(http.statusCode) else {
             return (result.data, http)
         }
@@ -313,7 +425,123 @@ struct NetworkClient {
         guard try await waitBeforeRetry(error, request: request, attempt: attempt) else {
             return (result.data, http)
         }
-        return try await performRaw(request, attempt: attempt + 1)
+        return try await performRaw(
+            request,
+            service: service,
+            configuration: configuration,
+            attempt: attempt + 1,
+            didRelogin: didRelogin
+        )
+    }
+
+    // MARK: - Hermes-Anmeldung
+
+    /// Loggt sich mit Benutzername/Passwort ein und übernimmt die Cookies.
+    ///
+    /// Der Login-Request wird über `makeURLRequest`/`injectHeaders` gebaut und
+    /// trägt damit dieselben Cloudflare-Header wie jeder andere Request. Die
+    /// Koaleszierung liegt in `HermesLoginCoordinator`: parallele 401s warten
+    /// auf denselben Login statt einen Sturm auszulösen.
+    private func loginHermes(configuration: ServiceConfiguration) async throws {
+        guard configuration.service == .hermes else { return }
+        guard let username = configuration.username,
+              let password = configuration.password
+        else {
+            throw APIError.invalidConfiguration(
+                "Für Hermes sind Benutzername und Passwort nicht hinterlegt."
+            )
+        }
+
+        var loginRequest = try makeURLRequest(
+            APIRequest(
+                method: .post,
+                path: "/auth/password-login",
+                body: try Self.makeLoginBody(username: username, password: password),
+                headers: ["Content-Type": "application/json"]
+            ),
+            configuration: configuration
+        )
+        // Eine abgelaufene Session-Cookie gehört nicht an den Login.
+        loginRequest.setValue(nil, forHTTPHeaderField: "Cookie")
+
+        let session = self.session
+        try await HermesLoginCoordinator.shared.login {
+            try await Self.performLogin(loginRequest, session: session)
+        }
+    }
+
+    private static func makeLoginBody(username: String, password: String) throws -> Data {
+        do {
+            return try JSONEncoder().encode(
+                HermesLoginBody(username: username, password: password)
+            )
+        } catch {
+            throw APIError.invalidRequest("Hermes-Anmeldung nicht serialisierbar.")
+        }
+    }
+
+    /// Führt genau einen Login aus und speichert die `Set-Cookie`-Werte.
+    ///
+    /// Grenze: kein Retry — ein abgelehnter Login wird als
+    /// `APIError.hermesLoginFailed` gemeldet; 403 bleibt der CF-Hinweis. Der
+    /// Fehlertext enthält weder Benutzername noch Passwort.
+    private static func performLogin(_ request: URLRequest, session: URLSession) async throws {
+        let result: (data: Data, response: URLResponse)
+        do {
+            result = try await session.data(for: request)
+        } catch let error as URLError {
+            switch error.code {
+            case .cancelled:
+                throw APIError.cancelled
+            case .timedOut:
+                throw APIError.timeout
+            default:
+                throw APIError.offline
+            }
+        } catch is CancellationError {
+            throw APIError.cancelled
+        }
+
+        guard let http = result.response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 401 {
+                throw APIError.hermesLoginFailed
+            }
+            throw APIError.from(
+                status: http.statusCode,
+                body: result.data,
+                retryAfter: Self.retryAfter(from: http)
+            )
+        }
+
+        guard let url = http.url ?? request.url else {
+            throw APIError.invalidResponse
+        }
+        // Der Login ersetzt den Sitzungsstand vollständig; ein alter Cookie
+        // darf nicht neben dem neuen weiter gesendet werden.
+        HermesCookieJar.shared.replace(from: http, url: url)
+        // Ein Login ohne Cookie wäre für jeden Folgerequest wertlos; lieber
+        // sichtbar scheitern als still weiterlaufen.
+        guard HermesCookieJar.shared.hasCookies else {
+            throw APIError.hermesLoginFailed
+        }
+    }
+
+    /// Liest höchstens `limit` Bytes aus einem Antwortstrom.
+    ///
+    /// Zweck: nur der kleine JSON-Body eines Hermes-401 wird vor der Entscheidung
+    /// über den Re-Login gebraucht; Erfolgsströme bleiben unangetastet.
+    private static func collect(_ bytes: URLSession.AsyncBytes, limit: Int) async throws -> Data {
+        var data = Data()
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count >= limit {
+                break
+            }
+        }
+        return data
     }
 
     /// Wartet, wenn der Fehler nach `attempt` wiederholt werden darf.
@@ -396,6 +624,18 @@ struct NetworkClient {
 }
 
 extension NetworkClient {
+    /// Standardsitzung ohne automatische Cookie-Ablage.
+    ///
+    /// Hermes-Cookies liegen ausschließlich in `HermesCookieJar` (Prozess-
+    /// speicher); `URLSession` darf sie weder selbst speichern noch einem
+    /// Request ungefragt hinzufügen. Für die übrigen Dienste ändert das nichts.
+    static let cookieFreeSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        return URLSession(configuration: configuration)
+    }()
+
     /// Client für „Test Verbindung“, der HTTP-Redirects nicht folgt.
     ///
     /// Zweck: Cloudflare Access antwortet unauthentifiziert mit 302 auf
@@ -406,6 +646,8 @@ extension NetworkClient {
     private static let redirectBlockingSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
         return URLSession(
             configuration: configuration,
             delegate: RedirectBlocker(),

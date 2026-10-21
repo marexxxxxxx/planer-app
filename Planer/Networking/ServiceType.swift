@@ -17,6 +17,10 @@ enum ServiceCredential: String, CaseIterable, Sendable {
     case cloudflareClientSecret = "cf_client_secret"
     case apiToken = "api_token"
     case apiKey = "api_key"
+    /// Hermes-Anmeldung: Benutzername des Password-Logins (MARAAA-146).
+    case username = "username"
+    /// Hermes-Anmeldung: Klartext-Passwort des Password-Logins (MARAAA-146).
+    case password = "password"
 
     /// Anzeigename für die Einstellungen.
     var displayName: String {
@@ -31,6 +35,10 @@ enum ServiceCredential: String, CaseIterable, Sendable {
             return "API-Token"
         case .apiKey:
             return "API-Key"
+        case .username:
+            return "Benutzername"
+        case .password:
+            return "Passwort"
         }
     }
 }
@@ -77,13 +85,17 @@ enum ServiceType: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// Dienstspezifischer API-Account; das Dashboard hat keinen (spec-ios §2.2).
+    ///
+    /// Hermes hat seit MARAAA-146 keinen API-Token mehr: die Anmeldung läuft
+    /// über Benutzername/Passwort (`.username`, `.password`) und danach über
+    /// Session-Cookies.
     var apiCredential: ServiceCredential? {
         switch self {
-        case .hermes, .mealie:
+        case .mealie:
             return .apiToken
         case .grocy:
             return .apiKey
-        case .dashboard:
+        case .hermes, .dashboard:
             return nil
         }
     }

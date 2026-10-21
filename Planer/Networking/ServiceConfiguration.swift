@@ -43,6 +43,10 @@ struct ServiceConfiguration: Equatable, Sendable {
     let cloudflareClientSecret: String?
     let apiKey: String?
     let apiToken: String?
+    /// Hermes: Benutzername des Password-Logins (MARAAA-146).
+    let username: String?
+    /// Hermes: Klartext-Passwort des Password-Logins; nur im Speicher, nie im Log.
+    let password: String?
 
     /// Liest die Konfiguration des Dienstes aus der Keychain (spec-ios §4).
     ///
@@ -65,16 +69,34 @@ struct ServiceConfiguration: Equatable, Sendable {
 
         let apiKey: String?
         let apiToken: String?
+        let username: String?
+        let password: String?
         switch service {
         case .grocy:
             apiKey = normalized(try keychain.value(for: service, account: .apiKey))
             apiToken = nil
-        case .hermes, .mealie:
+            username = nil
+            password = nil
+        case .mealie:
             apiKey = nil
             apiToken = normalized(try keychain.value(for: service, account: .apiToken))
+            username = nil
+            password = nil
+        case .hermes:
+            // MARAAA-146: Hermes akzeptiert keinen Bearer mehr; gelesen werden
+            // ausschließlich die Zugangsdaten des Password-Logins.
+            apiKey = nil
+            apiToken = nil
+            username = normalized(try keychain.value(for: service, account: .username))
+            // Ein Passwort wird nicht getrimmt: Leerzeichen können Teil des
+            // Geheimnisses sein. Ein leerer Wert gilt trotzdem als „nicht gesetzt“.
+            let rawPassword = try keychain.value(for: service, account: .password)
+            password = (rawPassword?.isEmpty ?? true) ? nil : rawPassword
         case .dashboard:
             apiKey = nil
             apiToken = nil
+            username = nil
+            password = nil
         }
 
         return ServiceConfiguration(
@@ -83,7 +105,9 @@ struct ServiceConfiguration: Equatable, Sendable {
             cloudflareClientID: clientID,
             cloudflareClientSecret: clientSecret,
             apiKey: apiKey,
-            apiToken: apiToken
+            apiToken: apiToken,
+            username: username,
+            password: password
         )
     }
 

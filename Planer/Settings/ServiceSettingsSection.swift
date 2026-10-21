@@ -27,6 +27,9 @@ struct ServiceSettingsSection: View {
     @State private var cloudflareClientID = ""
     @State private var cloudflareClientSecret = ""
     @State private var apiCredentialValue = ""
+    /// Hermes-Anmeldung (MARAAA-146); Mealie/Grocy/Dashboard bleiben beim Token.
+    @State private var hermesUsername = ""
+    @State private var hermesPassword = ""
     @State private var message: String?
     @State private var isTesting = false
 
@@ -51,7 +54,14 @@ struct ServiceSettingsSection: View {
 
             SecureField("CF-Access-Client-Secret", text: $cloudflareClientSecret)
 
-            if let credential = service.apiCredential {
+            if service == .hermes {
+                // Hermes akzeptiert keinen API-Token mehr; die Sitzung entsteht
+                // aus dem Password-Login (MARAAA-146).
+                TextField("Benutzername", text: $hermesUsername)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                SecureField("Passwort", text: $hermesPassword)
+            } else if let credential = service.apiCredential {
                 SecureField(credential.displayName, text: $apiCredentialValue)
             }
 
@@ -123,7 +133,10 @@ struct ServiceSettingsSection: View {
             }
             cloudflareClientID = try keychain.value(for: service, account: .cloudflareClientID) ?? ""
             cloudflareClientSecret = try keychain.value(for: service, account: .cloudflareClientSecret) ?? ""
-            if let credential = service.apiCredential {
+            if service == .hermes {
+                hermesUsername = try keychain.value(for: service, account: .username) ?? ""
+                hermesPassword = try keychain.value(for: service, account: .password) ?? ""
+            } else if let credential = service.apiCredential {
                 apiCredentialValue = try keychain.value(for: service, account: credential) ?? ""
             }
         } catch {
@@ -158,7 +171,12 @@ struct ServiceSettingsSection: View {
         }
         try persist(cloudflareClientID, account: .cloudflareClientID)
         try persist(cloudflareClientSecret, account: .cloudflareClientSecret)
-        if let credential = service.apiCredential {
+        if service == .hermes {
+            try persist(hermesUsername, account: .username)
+            // Das Passwort wird nicht getrimmt: Leerzeichen können Teil des
+            // Geheimnisses sein. Nur ein leeres Feld löscht den Eintrag.
+            try persistSecret(hermesPassword, account: .password)
+        } else if let credential = service.apiCredential {
             try persist(apiCredentialValue, account: credential)
         }
     }
@@ -172,8 +190,17 @@ struct ServiceSettingsSection: View {
         }
     }
 
-    /// Fachlicher Endpunkt je Dienst; er beweist, dass Basis-URL, Token und
-    /// CF-Access zusammenpassen — nicht nur, dass der Host antwortet.
+    /// Speichert einen Wert unverändert; nur ein leeres Feld löscht ihn.
+    private func persistSecret(_ value: String, account: ServiceCredential) throws {
+        if value.isEmpty {
+            try keychain.remove(for: service, account: account)
+        } else {
+            try keychain.set(value, for: service, account: account)
+        }
+    }
+
+    /// Fachlicher Endpunkt je Dienst; er beweist, dass Basis-URL, Zugangsdaten
+    /// und CF-Access zusammenpassen — nicht nur, dass der Host antwortet.
     ///
     /// Mealie/Grocy/Dashboard laufen über die `/api`-Basis, Hermes über den
     /// Origin und trägt `/api` selbst im Pfad.
@@ -235,7 +262,7 @@ struct ServiceSettingsSection: View {
 
     /// Übersetzt Status und Body in einen konkreten Hinweis.
     ///
-    /// Reihenfolge: 401 nennt das fehlende Token, 403 und eine 200-HTML-Seite
+    /// Reihenfolge: 401 nennt die fehlenden Zugangsdaten, 403 und eine 200-HTML-Seite
     /// kommen von Cloudflare Access, 404 heißt falscher Pfad. Der Pfad-Hinweis
     /// ist dienstspezifisch: Hermes erwartet den Origin ohne Pfad, die übrigen
     /// Dienste enden auf `/api` (MARAAA-142). Ein 302 wird nicht verfolgt und
@@ -284,7 +311,10 @@ struct ServiceSettingsSection: View {
         switch service {
         case .grocy:
             return "API-Key"
-        case .hermes, .mealie:
+        case .hermes:
+            // Hermes meldet sich mit Password-Login an, nicht mit einem Token.
+            return "Benutzername oder Passwort"
+        case .mealie:
             return "API-Token"
         case .dashboard:
             return "Anmeldung"

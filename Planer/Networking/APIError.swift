@@ -32,6 +32,11 @@ enum APIError: Error, Equatable, Sendable {
     case offline
     case unauthorized
     case forbidden
+    /// Der Password-Login von Hermes wurde abgelehnt (MARAAA-146).
+    ///
+    /// Grenze: trägt bewusst keinen Servertext und keine Zugangsdaten — die
+    /// Meldung darf niemals Benutzername oder Passwort enthalten.
+    case hermesLoginFailed
     case notFound
     case conflict(message: String)
     case rateLimited(retryAfter: TimeInterval?)
@@ -59,7 +64,7 @@ enum APIError: Error, Equatable, Sendable {
         case .server(let status, _, _, _):
             return status
         case .invalidConfiguration, .invalidRequest, .invalidResponse, .cancelled,
-             .timeout, .offline, .emptyResponse, .decoding:
+             .timeout, .offline, .emptyResponse, .decoding, .hermesLoginFailed:
             return nil
         }
     }
@@ -74,7 +79,8 @@ enum APIError: Error, Equatable, Sendable {
         case .server(_, _, _, let retryable):
             return retryable
         case .conflict, .invalidConfiguration, .invalidRequest, .invalidResponse, .cancelled,
-             .unauthorized, .forbidden, .notFound, .validation, .emptyResponse, .decoding:
+             .unauthorized, .forbidden, .notFound, .validation, .emptyResponse, .decoding,
+             .hermesLoginFailed:
             return false
         }
     }
@@ -147,6 +153,8 @@ extension APIError: LocalizedError {
             return "Zugriff verweigert — Anmeldung prüfen."
         case .forbidden:
             return "Zugriff verweigert — CF-Access prüfen."
+        case .hermesLoginFailed:
+            return "Hermes-Anmeldung fehlgeschlagen — Benutzername und Passwort prüfen."
         case .notFound:
             return "Eintrag nicht gefunden."
         case .conflict(let message):
