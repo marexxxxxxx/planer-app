@@ -17,10 +17,15 @@
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen WP-Abnahmen laufen ebenfalls über grep-/Schema-Prüfungen.
 #
-# Grenze der Prüfung (MARAAA-149): der 401-Grundfilter wird strukturell über
-# den Funktionskörper von `indicatesExpiredSession` geprüft (Rückgabe `false`
-# im Guard, Entscheidung über beide Mengen, kein pauschales `return true`).
-# Ein echter Swift-Laufzeittest für „fremder Grund → kein Re-Login" fehlt.
+# Grenze der Prüfung (MARAAA-149, MARAAA-152): der 401-Grundfilter wird
+# strukturell über den Funktionskörper von `indicatesExpiredSession` geprüft:
+# Rückgabe `false` im Guard, die **positive** Entscheidungsform über beide
+# Mengen als zusammenhängender Block, kein invertiertes `return !…` und kein
+# pauschales `return true`. Der Re-Login wird in `performRaw` und
+# `performStream` getrennt gefordert. Abschnitte werden vor dem Match um reine
+# Kommentarzeilen bereinigt, damit ein auskommentierter Aufruf keine Prüfung
+# erfüllt. Ein echter Swift-Laufzeittest für „fremder Grund → kein Re-Login"
+# fehlt weiterhin.
 #
 set -euo pipefail
 
@@ -86,6 +91,19 @@ section_between() {
         flag && $0 ~ stop { exit }
         flag { print }
     ' "$file"
+}
+
+# Abschnitt ohne reine Kommentarzeilen.
+#
+# `grep -F` matcht sonst auch `// injectHermesCookies(into: &retried)` und ein
+# auskommentierter Aufruf erfüllte die Prüfung (MARAAA-152).
+strip_comments() {
+    grep -v '^[[:space:]]*//' <<<"$1" || true
+}
+
+# Abschnitt ohne jeglichen Leerraum — für Prüfungen auf mehrzeilige Formen.
+compact() {
+    tr -d '[:space:]' <<<"$1"
 }
 
 client="Planer/Networking/NetworkClient.swift"
@@ -189,6 +207,8 @@ forbid "keine Zugangsdaten im Fehlertext (Passwort)" \
 # (MARAAA-149, MARAAA-148).
 perform_section="$(section_between 'private func performRaw' '// MARK: - Hermes-Anmeldung' "$client")"
 stream_section="$(section_between 'private func performStream' '// MARK: - Request-Aufbau' "$client")"
+perform_code="$(strip_comments "$perform_section")"
+stream_code="$(strip_comments "$stream_section")"
 
 require_fixed "Cookie-Header wird aus den gespeicherten Cookies gebaut" \
     'HTTPCookie.requestHeaderFields(with:' "$session"
@@ -198,12 +218,12 @@ require_fixed "Cookies werden aus der Antwort gespeichert" \
     'HermesCookieJar.shared.replace(from:' "$client"
 require_fixed "Hermes-Requests senden den Cookie-Header" \
     'request.setValue(cookie, forHTTPHeaderField: "Cookie")' "$client"
-if grep -qF 'injectHermesCookies(into: &retried)' <<<"$stream_section"; then
+if grep -qF 'injectHermesCookies(into: &retried)' <<<"$stream_code"; then
     pass "der Stream sendet nach dem Re-Login den Cookie-Header"
 else
     fail_check "der Stream sendet nach dem Re-Login den Cookie-Header"
 fi
-if grep -qF 'injectHermesCookies(into: &retried)' <<<"$perform_section"; then
+if grep -qF 'injectHermesCookies(into: &retried)' <<<"$perform_code"; then
     pass "performRaw sendet nach dem Re-Login den Cookie-Header"
 else
     fail_check "performRaw sendet nach dem Re-Login den Cookie-Header"
@@ -221,28 +241,45 @@ done
 
 # Die vier Literale oben belegen nur, dass die Werte irgendwo in der Datei
 # stehen. Der Filter selbst muss sie auch auswerten — und für einen fremden
-# Grund `false` liefern. Ohne Swift-Laufzeit geschieht das strukturell über den
-# Funktionskörper von `indicatesExpiredSession` (MARAAA-149).
+# Grund `false` liefern, für einen passenden `true`. Ohne Swift-Laufzeit
+# geschieht das strukturell über den Funktionskörper von
+# `indicatesExpiredSession` (MARAAA-149, MARAAA-152).
 auth_filter_section="$(section_between 'static func indicatesExpiredSession' 'final class HermesCookieJar' "$session")"
-if grep -qF 'return false' <<<"$auth_filter_section"; then
+auth_filter_code="$(strip_comments "$auth_filter_section")"
+if grep -qF 'return false' <<<"$auth_filter_code"; then
     pass "401-Filter liefert für fremde Gründe false"
 else
     fail_check "401-Filter liefert für fremde Gründe false"
 fi
-if grep -qF 'expiredReasons.contains(failure.reason' <<<"$auth_filter_section"; then
+if grep -qF 'expiredReasons.contains(failure.reason' <<<"$auth_filter_code"; then
     pass "401-Filter entscheidet über expiredReasons"
 else
     fail_check "401-Filter entscheidet über expiredReasons"
 fi
-if grep -qF 'expiredErrors.contains(failure.error' <<<"$auth_filter_section"; then
+if grep -qF 'expiredErrors.contains(failure.error' <<<"$auth_filter_code"; then
     pass "401-Filter entscheidet über expiredErrors"
 else
     fail_check "401-Filter entscheidet über expiredErrors"
 fi
-if grep -qE 'return[[:space:]]+true' <<<"$auth_filter_section"; then
+if grep -qE 'return[[:space:]]+true' <<<"$auth_filter_code"; then
     fail_check "401-Filter löst nicht pauschal für jeden 401 aus"
 else
     pass "401-Filter löst nicht pauschal für jeden 401 aus"
+fi
+
+# Die Richtung der Entscheidung: die positive Form muss als zusammenhängender
+# Block dastehen. `return !(… || …)` erfüllt die Anwesenheitsprüfungen oben,
+# kehrt aber genau die belegte Entscheidung um (MARAAA-152).
+positive_filter='returnexpiredReasons.contains(failure.reason??"")||expiredErrors.contains(failure.error??"")'
+if [[ "$(compact "$auth_filter_code")" == *"$positive_filter"* ]]; then
+    pass "401-Filter entscheidet positiv über beide Mengen"
+else
+    fail_check "401-Filter entscheidet positiv über beide Mengen"
+fi
+if grep -qE 'return[[:space:]]+!' <<<"$auth_filter_code"; then
+    fail_check "401-Filter ist nicht invertiert"
+else
+    pass "401-Filter ist nicht invertiert"
 fi
 
 require_fixed "Re-Login ist durch ein Guard-Flag begrenzt" \
@@ -262,22 +299,29 @@ else
     fail_check "Re-Login wird auf beiden Wegen nur einmal ausgelöst (gefunden: $guards)"
 fi
 
-if [[ -n "$perform_section" ]] \
-    && grep -qF 'http.statusCode == 401' <<<"$perform_section" \
-    && grep -qF 'service == .hermes' <<<"$perform_section"; then
+if [[ -n "$perform_code" ]] \
+    && grep -qF 'http.statusCode == 401' <<<"$perform_code" \
+    && grep -qF 'service == .hermes' <<<"$perform_code"; then
     pass "performRaw behandelt den Hermes-401"
 else
     fail_check "performRaw behandelt den Hermes-401"
 fi
-if grep -qF 'HermesAuthFailure.indicatesExpiredSession(result.data)' <<<"$perform_section"; then
+if grep -qF 'HermesAuthFailure.indicatesExpiredSession(result.data)' <<<"$perform_code"; then
     pass "performRaw prüft den 401-Grund vor dem Re-Login"
 else
     fail_check "performRaw prüft den 401-Grund vor dem Re-Login"
 fi
+# Ohne diese Forderung blieb das Skript grün, wenn `performRaw` den 401 zwar
+# erkennt, aber gar keinen Re-Login ausführt (MARAAA-151, Befund 1).
+if grep -qF 'loginHermes(configuration: configuration)' <<<"$perform_code"; then
+    pass "performRaw loggt sich nach dem 401 neu ein"
+else
+    fail_check "performRaw loggt sich nach dem 401 neu ein"
+fi
 
-if [[ -n "$stream_section" ]] \
-    && grep -qF 'HermesAuthFailure.indicatesExpiredSession(body)' <<<"$stream_section" \
-    && grep -qF 'loginHermes(configuration: configuration)' <<<"$stream_section"; then
+if [[ -n "$stream_code" ]] \
+    && grep -qF 'HermesAuthFailure.indicatesExpiredSession(body)' <<<"$stream_code" \
+    && grep -qF 'loginHermes(configuration: configuration)' <<<"$stream_code"; then
     pass "Stream behandelt den Hermes-401 mit demselben Grund"
 else
     fail_check "Stream behandelt den Hermes-401 mit demselben Grund"
