@@ -257,6 +257,48 @@ else
     skip "V3: VoiceState.swift/VoiceCoordinator.swift noch nicht vorhanden"
 fi
 
+# --- §8.1: zulässige Audio-Session-Kombination (G-V2-Hinweis 10a) ----------
+#
+# `.duckOthers` ist nur mit playAndRecord, playback und multiRoute zulässig.
+# Mit `.record` lehnt AVAudioSession die Kategorie ab
+# (AVAudioSessionErrorCodeIncompatibleCategory) und jeder Diktatversuch
+# endet vor der Erkennung im Fehlerzustand. Der Aufruf wird deshalb über
+# Klammerbilanz gelesen, damit auch mehrzeilig geschriebene Kombinationen
+# auffallen.
+
+if [[ -f "$coordinator" ]]; then
+    duck_offenders="$(awk '
+        function report() {
+            if (call ~ /\.record/ && call ~ /\.duckOthers/) {
+                print file ":" start
+            }
+            call = ""
+        }
+        FNR == 1 { call = ""; depth = 0 }
+        {
+            if (depth == 0) {
+                if ($0 !~ /setCategory\(/) next
+                file = FILENAME
+                start = FNR
+            }
+            call = call $0 "\n"
+            opens = gsub(/\(/, "(", $0)
+            closes = gsub(/\)/, ")", $0)
+            depth += opens - closes
+            if (depth <= 0) { depth = 0; report() }
+        }
+        END { if (depth > 0) report() }
+    ' $(find Planer -name '*.swift' | sort))"
+
+    if [[ -z "$duck_offenders" ]]; then
+        pass "§8.1: .record und .duckOthers stehen in keinem setCategory-Aufruf gemeinsam"
+    else
+        fail_check "§8.1: .record und .duckOthers stehen gemeinsam in setCategory ($duck_offenders)"
+    fi
+else
+    skip "§8.1: VoiceCoordinator.swift noch nicht vorhanden"
+fi
+
 # --- V5: Router und Messprotokoll (§7, §13) -------------------------------
 
 router="Planer/Voice/ModelRouter.swift"

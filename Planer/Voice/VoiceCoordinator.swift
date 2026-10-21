@@ -786,7 +786,9 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
     private func activateSession(forRecording: Bool) throws {
         let session = AVAudioSession.sharedInstance()
         if forRecording {
-            try session.setCategory(.record, mode: .measurement, options: [.duckOthers])
+            // `.duckOthers` gilt nur für playAndRecord, playback und multiRoute;
+            // mit `.record` lehnt AVAudioSession die Kategorie ab (§8.1/T1).
+            try session.setCategory(.record, mode: .measurement, options: [])
         } else {
             try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         }
