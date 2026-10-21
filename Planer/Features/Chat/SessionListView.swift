@@ -107,6 +107,7 @@ struct SessionListView: View {
             }
         }
         .listStyle(.plain)
+        .scrollDismissesKeyboard(.interactively)
         .refreshable { onRetry() }
     }
 

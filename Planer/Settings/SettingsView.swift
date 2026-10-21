@@ -24,6 +24,7 @@ struct SettingsView: View {
                 AppLockSection()
                 VoiceSettingsSection()
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Einstellungen")
         }
     }
