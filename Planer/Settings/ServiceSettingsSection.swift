@@ -236,8 +236,10 @@ struct ServiceSettingsSection: View {
     /// Übersetzt Status und Body in einen konkreten Hinweis.
     ///
     /// Reihenfolge: 401 nennt das fehlende Token, 403 und eine 200-HTML-Seite
-    /// kommen von Cloudflare Access, 404 heißt falscher Pfad. Ein 302 wird
-    /// nicht verfolgt und bleibt darum als `Location` sichtbar.
+    /// kommen von Cloudflare Access, 404 heißt falscher Pfad. Der Pfad-Hinweis
+    /// ist dienstspezifisch: Hermes erwartet den Origin ohne Pfad, die übrigen
+    /// Dienste enden auf `/api` (MARAAA-142). Ein 302 wird nicht verfolgt und
+    /// bleibt darum als `Location` sichtbar.
     private static func connectionMessage(
         status: Int,
         data: Data,
@@ -251,7 +253,12 @@ struct ServiceSettingsSection: View {
             return "Cloudflare Access: Service-Token fehlt oder ungültig."
         }
         if status == 404 {
-            return "Pfad falsch, /api prüfen."
+            switch service {
+            case .hermes:
+                return "Pfad falsch — Hermes erwartet den Origin ohne Pfad."
+            case .mealie, .grocy, .dashboard:
+                return "Pfad falsch, /api prüfen."
+            }
         }
         if (300..<400).contains(status) {
             if isCloudflareRedirect(response) {

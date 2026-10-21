@@ -11,6 +11,7 @@ import Foundation
 enum ServiceConfigurationError: Error, Equatable, LocalizedError {
     case missingBaseURL(ServiceType)
     case invalidBaseURL(String)
+    case unexpectedPath(ServiceType, String)
     case incompleteCloudflareCredentials(ServiceType)
 
     var errorDescription: String? {
@@ -19,6 +20,10 @@ enum ServiceConfigurationError: Error, Equatable, LocalizedError {
             return "Für \(service.displayName) ist keine Basis-URL hinterlegt."
         case .invalidBaseURL(let value):
             return "Die Basis-URL muss eine gültige https-Adresse sein (http nur für localhost/127.0.0.1): \(value)"
+        case .unexpectedPath(let service, let path):
+            // Nur das abschließende `/api` wird still entfernt; jeder andere
+            // Pfad ist ein Eingabefehler und bleibt sichtbar (MARAAA-142).
+            return "\(service.displayName) erwartet den Origin ohne Pfad — bitte nur Schema und Host eintragen, nicht „\(path)“."
         case .incompleteCloudflareCredentials(let service):
             return "Für \(service.displayName) sind CF-Access-Client-ID und -Secret nur unvollständig hinterlegt."
         }
@@ -120,7 +125,8 @@ struct ServiceConfiguration: Equatable, Sendable {
     /// die Feature-Repositories `/recipes`, `/objects/products` und `/tasks`
     /// senden; die Basis-URL muss deshalb auf `/api` enden. Hermes erwartet
     /// dagegen den nackten Origin, sonst würde `/api/sessions` zu
-    /// `/api/api/sessions` (Chat-Guard F22).
+    /// `/api/api/sessions` (Chat-Guard F22); dort entfällt ausschließlich ein
+    /// abschließendes `/api`, jeder andere Pfad wird abgelehnt (MARAAA-142).
     /// Grenze: normalisiert nur Schema, Host, Pfad und entfernt Query/Fragment;
     /// sie prüft nicht die Erreichbarkeit.
     static func normalizeBaseURL(_ rawValue: String?, for service: ServiceType) throws -> URL {
@@ -143,10 +149,16 @@ struct ServiceConfiguration: Equatable, Sendable {
                 path += "/api"
             }
         case .hermes:
-            // Hermes erwartet den Origin: ein gespeichertes `/api` aus älteren
-            // Einträgen entfällt damit, jeder andere Pfad ebenfalls. Sonst
-            // würde `/api/sessions` zu `/api/api/sessions` (Chat-Guard F22).
-            path = ""
+            if path == "/api" {
+                // Altbestand: ein gespeichertes `/api` entfällt, damit
+                // `/api/sessions` nicht zu `/api/api/sessions` wird.
+                path = ""
+            } else if !path.isEmpty {
+                // Ein fremder Pfad wird nicht still verworfen, sondern sichtbar
+                // abgelehnt; sonst liefe der Request gegen einen Host-Pfad, den
+                // der Nutzer nie eingegeben hat.
+                throw ServiceConfigurationError.unexpectedPath(service, path)
+            }
         }
 
         components.path = path

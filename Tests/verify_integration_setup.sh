@@ -3,8 +3,9 @@
 # Statischer Regressionstest für MARAAA-133 (Diagnose MARAAA-132, §5 B1/B2/B9,
 # §8 F1/F6, §10):
 #   (1) Ein Helper normalisiert die Basis-URL: Mealie/Grocy/Dashboard bekommen
-#       `/api`, Hermes bleibt Origin-only; gespeicherte URLs werden beim Laden
-#       normalisiert.
+#       `/api`, Hermes verliert nur ein abschließendes `/api` und lehnt jeden
+#       anderen Pfad sichtbar ab (MARAAA-142); gespeicherte URLs werden beim
+#       Laden normalisiert.
 #   (2) Die Einstellungs-Sektion nennt je Dienst ein Beispiel.
 #   (3) „Test Verbindung“ ruft je Dienst einen fachlichen Endpunkt ab; Erfolg
 #       nur bei 2xx **und** JSON, sonst konkreter Token-/CF-/Pfad-Hinweis.
@@ -82,21 +83,35 @@ require "Mealie/Grocy/Dashboard hängen /api an" \
 require "das Anhängen prüft das /api-Ende" \
     'hasSuffix\("/api"\)' "$configuration"
 
-# Der Hermes-Zweig muss den Pfad leeren (Origin-only); der /api-Zweig darf dort
-# nicht auftauchen. Der Ausschnitt reicht vom `case .hermes:` bis zum Ende des
-# switch-Blocks.
+# Der Hermes-Zweig darf den Pfad nicht mehr pauschal leeren (MARAAA-142):
+# ein abschließendes `/api` wird entfernt, jeder andere Pfad abgelehnt. Der
+# Ausschnitt reicht vom `case .hermes:` bis zum Ende des switch-Blocks.
 hermes_branch="$(awk '/case \.hermes:/{flag=1} flag{print} flag && /^        }/{exit}' \
     "$configuration")" || true
-if [[ -n "$hermes_branch" ]] && grep -qE 'path = ""' <<<"$hermes_branch"; then
-    pass "Hermes bleibt Origin-only (kein Pfad)"
+if [[ -n "$hermes_branch" ]] && grep -qE 'if path == "/api" \{' <<<"$hermes_branch"; then
+    pass "Hermes entfernt nur ein abschließendes /api"
 else
-    fail_check "Hermes bleibt Origin-only (kein Pfad)"
+    fail_check "Hermes entfernt nur ein abschließendes /api"
+fi
+if grep -qE 'throw ServiceConfigurationError\.unexpectedPath' <<<"$hermes_branch"; then
+    pass "Hermes lehnt einen fremden Pfad sichtbar ab"
+else
+    fail_check "Hermes lehnt einen fremden Pfad sichtbar ab"
+fi
+api_guard_line="$(grep -nE 'if path == "/api" \{' <<<"$hermes_branch" | head -1 | cut -d: -f1)" || true
+wipe_line="$(grep -nE 'path = ""' <<<"$hermes_branch" | head -1 | cut -d: -f1)" || true
+if [[ -n "$api_guard_line" && -n "$wipe_line" && "$api_guard_line" -lt "$wipe_line" ]]; then
+    pass "Leeren des Pfads steht hinter der /api-Prüfung"
+else
+    fail_check "Leeren des Pfads steht hinter der /api-Prüfung (api=$api_guard_line, wipe=$wipe_line)"
 fi
 if grep -qE 'path \+= "/api"' <<<"$hermes_branch"; then
     fail_check "Hermes bekommt kein /api angehängt"
 else
     pass "Hermes bekommt kein /api angehängt"
 fi
+require_fixed "Pfad-Ablehnung ist als Fehlertext formuliert" \
+    "erwartet den Origin ohne Pfad" "$configuration"
 
 require "Einstellungen normalisieren die gespeicherte URL beim Laden" \
     'normalizeBaseURL\(storedBaseURL' "$settings"
@@ -181,8 +196,32 @@ require "302 auf cloudflareaccess.com wird erkannt" \
     'location\.contains\("cloudflareaccess\.com"\)' "$settings"
 require "404 nennt den Pfad-Hinweis" \
     'status == 404' "$settings"
-require_fixed "Pfad-Hinweis nennt /api" \
-    "Pfad falsch, /api prüfen." "$settings"
+# Die 404-Antwort ist dienstspezifisch (MARAAA-142): Hermes erwartet den
+# Origin, die übrigen Dienste enden auf `/api`. Der Ausschnitt reicht vom
+# 404-Zweig bis zu dessen schließender Klammer.
+path_hint_branch="$(awk '/if status == 404 \{/{flag=1} flag{print} flag && /^        \}/{exit}' \
+    "$settings")" || true
+if [[ -n "$path_hint_branch" ]] \
+    && grep -qF 'case .hermes:' <<<"$path_hint_branch" \
+    && grep -qF 'Pfad falsch — Hermes erwartet den Origin ohne Pfad.' <<<"$path_hint_branch"; then
+    pass "Hermes-404 nennt den Origin ohne Pfad"
+else
+    fail_check "Hermes-404 nennt den Origin ohne Pfad"
+fi
+if [[ -n "$path_hint_branch" ]] \
+    && grep -qF 'case .mealie, .grocy, .dashboard:' <<<"$path_hint_branch" \
+    && grep -qF 'Pfad falsch, /api prüfen.' <<<"$path_hint_branch"; then
+    pass "404 der übrigen Dienste nennt /api"
+else
+    fail_check "404 der übrigen Dienste nennt /api"
+fi
+hermes_hint_line="$(grep -nF 'Pfad falsch — Hermes erwartet den Origin ohne Pfad.' <<<"$path_hint_branch" | head -1 | cut -d: -f1)" || true
+api_hint_line="$(grep -nF 'Pfad falsch, /api prüfen.' <<<"$path_hint_branch" | head -1 | cut -d: -f1)" || true
+if [[ -n "$hermes_hint_line" && -n "$api_hint_line" && "$hermes_hint_line" -lt "$api_hint_line" ]]; then
+    pass "Hermes-404 liegt im Hermes-Zweig vor dem /api-Hinweis"
+else
+    fail_check "Hermes-404 liegt im Hermes-Zweig vor dem /api-Hinweis (hermes=$hermes_hint_line, api=$api_hint_line)"
+fi
 
 require "Redirects werden nicht verfolgt" \
     'willPerformHTTPRedirection' "$client"
