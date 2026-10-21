@@ -10,7 +10,8 @@ import Foundation
 /// Begrenzt, wie oft und wie lange ein fehlgeschlagener Request wiederholt wird.
 ///
 /// Zweck: exponentielles Backoff für Timeout, Offline, 429 und retryable 5xx;
-/// 400/401/403 werden nie wiederholt.
+/// 400/401/403 werden nie wiederholt. Die Methode prüft der `NetworkClient`:
+/// wiederholt wird ausschließlich GET, nie `POST`/`PATCH`/`DELETE` (F6).
 /// Grenze: kein Circuit Breaker und kein Persistieren von Fehlversuchen.
 struct RetryPolicy: Equatable, Sendable {
     /// Gesamtzahl der Versuche inklusive des ersten.

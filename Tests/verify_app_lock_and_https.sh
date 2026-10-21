@@ -117,16 +117,18 @@ forbid "keine pauschale http-Freigabe" \
 require "eine gemeinsame URL-Prüfung existiert" \
     'static func validateBaseURL' "$configuration"
 require "Laden nutzt die gemeinsame URL-Prüfung" \
-    'validateBaseURL\(rawBaseURL' "$configuration"
+    '(validateBaseURL|normalizeBaseURL)\(rawBaseURL' "$configuration"
 require "Ablehnung nennt die Transport-Regel" \
     'muss eine gültige https-Adresse sein' "$configuration"
 require "Eingabe zeigt den Fehler sichtbar an" \
     'message = error\.localizedDescription' "$settings"
 require "Eingabe prüft die Basis-URL vor dem Ablegen" \
-    'ServiceConfiguration\.validateBaseURL' "$settings"
+    'ServiceConfiguration\.normalizeBaseURL' "$settings"
 
-validate_line="$(grep -n 'ServiceConfiguration.validateBaseURL' "$settings" | head -1 | cut -d: -f1)" || true
-persist_line="$(grep -n 'persist(baseURL' "$settings" | head -1 | cut -d: -f1)" || true
+validate_line="$(grep -n 'normalizeBaseURL(trimmedBaseURL' "$settings" | head -1 | cut -d: -f1)" || true
+persist_line="$(awk -v start="${validate_line:-0}" \
+    'NR > start && /keychain\.set\(normalized\.absoluteString/ { print NR; exit }' \
+    "$settings")" || true
 if [[ -n "$validate_line" && -n "$persist_line" && "$validate_line" -lt "$persist_line" ]]; then
     pass "Prüfung liegt im gemeinsamen Speicherpfad (auch „Test Verbindung“)"
 else

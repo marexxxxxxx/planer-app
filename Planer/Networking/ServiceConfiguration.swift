@@ -50,7 +50,7 @@ struct ServiceConfiguration: Equatable, Sendable {
         keychain: KeychainManager = KeychainManager()
     ) throws -> ServiceConfiguration {
         let rawBaseURL = try keychain.value(for: service, account: .baseURL)
-        let baseURL = try validateBaseURL(rawBaseURL, for: service)
+        let baseURL = try normalizeBaseURL(rawBaseURL, for: service)
 
         let clientID = normalized(try keychain.value(for: service, account: .cloudflareClientID))
         let clientSecret = normalized(try keychain.value(for: service, account: .cloudflareClientSecret))
@@ -111,6 +111,51 @@ struct ServiceConfiguration: Equatable, Sendable {
         default:
             throw ServiceConfigurationError.invalidBaseURL(value)
         }
+    }
+
+    /// Ergänzt bzw. entfernt den `/api`-Teil, den ein Dienst in seiner Basis-URL
+    /// erwartet (MARAAA-133).
+    ///
+    /// Mealie, Grocy und Dashboard hängen ihre Endpunkte ohne `/api` an, weil
+    /// die Feature-Repositories `/recipes`, `/objects/products` und `/tasks`
+    /// senden; die Basis-URL muss deshalb auf `/api` enden. Hermes erwartet
+    /// dagegen den nackten Origin, sonst würde `/api/sessions` zu
+    /// `/api/api/sessions` (Chat-Guard F22).
+    /// Grenze: normalisiert nur Schema, Host, Pfad und entfernt Query/Fragment;
+    /// sie prüft nicht die Erreichbarkeit.
+    static func normalizeBaseURL(_ rawValue: String?, for service: ServiceType) throws -> URL {
+        let url = try validateBaseURL(rawValue, for: service)
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            throw ServiceConfigurationError.invalidBaseURL(url.absoluteString)
+        }
+
+        var path = components.path
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        if path == "/" {
+            path = ""
+        }
+
+        switch service {
+        case .mealie, .grocy, .dashboard:
+            if !path.hasSuffix("/api") {
+                path += "/api"
+            }
+        case .hermes:
+            // Hermes erwartet den Origin: ein gespeichertes `/api` aus älteren
+            // Einträgen entfällt damit, jeder andere Pfad ebenfalls. Sonst
+            // würde `/api/sessions` zu `/api/api/sessions` (Chat-Guard F22).
+            path = ""
+        }
+
+        components.path = path
+        components.query = nil
+        components.fragment = nil
+        guard let normalizedURL = components.url else {
+            throw ServiceConfigurationError.invalidBaseURL(url.absoluteString)
+        }
+        return normalizedURL
     }
 
     /// Trimmt Werte und behandelt leere Strings wie „nicht gesetzt“.

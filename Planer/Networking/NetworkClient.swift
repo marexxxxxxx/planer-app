@@ -90,14 +90,26 @@ struct NetworkClient {
 
     /// Führt den Request aus und liefert die Rohdaten (auch leer bei `204`).
     func send(_ request: APIRequest, for service: ServiceType) async throws -> Data {
-        let configuration: ServiceConfiguration
-        do {
-            configuration = try ServiceConfiguration.load(service, keychain: keychain)
-        } catch {
-            throw APIError.invalidConfiguration(error.localizedDescription)
-        }
+        let configuration = try loadConfiguration(for: service)
         let urlRequest = try makeURLRequest(request, configuration: configuration)
         return try await perform(urlRequest, attempt: 1)
+    }
+
+    /// Führt den Request aus und liefert Rohdaten plus HTTP-Kopf.
+    ///
+    /// Zweck: Der Verbindungstest der Einstellungen muss Status und Body sehen,
+    /// um 401, 403, 404 und die HTML-Anmeldeseite von Cloudflare Access zu
+    /// unterscheiden; `send` wirft Nicht-2xx und verliert dabei den Body.
+    /// Grenze: wiederholt wie `send` nur GET bei Timeout/Offline/5xx. Einen
+    /// Redirect verfolgt nur der übergebene Client — für den Verbindungstest
+    /// ist das `NetworkClient.connectionTest`, der Redirects stehen lässt.
+    func sendRaw(
+        _ request: APIRequest,
+        for service: ServiceType
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
+        let configuration = try loadConfiguration(for: service)
+        let urlRequest = try makeURLRequest(request, configuration: configuration)
+        return try await performRaw(urlRequest, attempt: 1)
     }
 
     /// Führt den Request aus und decodiert die Antwort als `Response`.
@@ -127,12 +139,7 @@ struct NetworkClient {
     /// geworfen, weil der Fehlertext im Strom stehen kann: der Aufrufer prüft
     /// `response.statusCode` und liest den Body begrenzt.
     func stream(_ request: APIRequest, for service: ServiceType) async throws -> StreamingResponse {
-        let configuration: ServiceConfiguration
-        do {
-            configuration = try ServiceConfiguration.load(service, keychain: keychain)
-        } catch {
-            throw APIError.invalidConfiguration(error.localizedDescription)
-        }
+        let configuration = try loadConfiguration(for: service)
         let urlRequest = try makeURLRequest(request, configuration: configuration)
 
         do {
@@ -241,9 +248,38 @@ struct NetworkClient {
 
     // MARK: - Ausführung und Retry
 
+    private func loadConfiguration(for service: ServiceType) throws -> ServiceConfiguration {
+        do {
+            return try ServiceConfiguration.load(service, keychain: keychain)
+        } catch {
+            throw APIError.invalidConfiguration(error.localizedDescription)
+        }
+    }
+
     private func perform(_ request: URLRequest, attempt: Int) async throws -> Data {
+        let result = try await performRaw(request, attempt: attempt)
+        guard (200..<300).contains(result.response.statusCode) else {
+            throw APIError.from(
+                status: result.response.statusCode,
+                body: result.data,
+                retryAfter: Self.retryAfter(from: result.response)
+            )
+        }
+        return result.data
+    }
+
+    /// Führt einen Versuch aus, wiederholt wiederholbare Fehler und liefert die
+    /// Rohantwort — auch Nicht-2xx, damit `sendRaw` den Body auswerten kann.
+    ///
+    /// Wiederholt werden Transportfehler sowie 429 und retryable 5xx; die
+    /// Methodenprüfung liegt in `waitBeforeRetry`.
+    private func performRaw(
+        _ request: URLRequest,
+        attempt: Int
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
         // Der Netzwerkaufruf steht bewusst allein im do-Block: Fehler aus
-        // `retry` dürfen nicht erneut von diesem catch abgefangen werden.
+        // `waitBeforeRetry` dürfen nicht erneut von diesem catch abgefangen
+        // werden.
         let result: (data: Data, response: URLResponse)
         do {
             result = try await session.data(for: request)
@@ -252,30 +288,49 @@ struct NetworkClient {
                 throw APIError.cancelled
             }
             let mapped: APIError = error.code == .timedOut ? .timeout : .offline
-            return try await retry(mapped, request: request, attempt: attempt)
+            guard try await waitBeforeRetry(mapped, request: request, attempt: attempt) else {
+                throw mapped
+            }
+            return try await performRaw(request, attempt: attempt + 1)
         } catch is CancellationError {
             throw APIError.cancelled
         } catch {
-            throw APIError.invalidRequest(error.localizedDescription)
+            // Kein `error.localizedDescription`: die kann die URL enthalten.
+            throw APIError.invalidRequest("Verbindung zum Dienst nicht möglich.")
         }
 
         guard let http = result.response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
-        if (200..<300).contains(http.statusCode) {
-            return result.data
+        guard !(200..<300).contains(http.statusCode) else {
+            return (result.data, http)
         }
         let error = APIError.from(
             status: http.statusCode,
             body: result.data,
             retryAfter: Self.retryAfter(from: http)
         )
-        return try await retry(error, request: request, attempt: attempt)
+        guard try await waitBeforeRetry(error, request: request, attempt: attempt) else {
+            return (result.data, http)
+        }
+        return try await performRaw(request, attempt: attempt + 1)
     }
 
-    private func retry(_ error: APIError, request: URLRequest, attempt: Int) async throws -> Data {
-        guard retryPolicy.shouldRetry(error, afterAttempt: attempt) else {
-            throw error
+    /// Wartet, wenn der Fehler nach `attempt` wiederholt werden darf.
+    ///
+    /// Wiederholt wird ausschließlich GET: ein unbeaufsichtigtes `POST`,
+    /// `PATCH` oder `DELETE` könnte eine zweite Sitzung oder einen zweiten
+    /// Eintrag anlegen (F6 aus MARAAA-132). 400/401/403/404/409 sind ohnehin
+    /// nicht wiederholbar (`APIError.isRetryable`).
+    private func waitBeforeRetry(
+        _ error: APIError,
+        request: URLRequest,
+        attempt: Int
+    ) async throws -> Bool {
+        guard request.httpMethod == HTTPMethod.get.rawValue,
+              retryPolicy.shouldRetry(error, afterAttempt: attempt)
+        else {
+            return false
         }
         let policyDelay = retryPolicy.delay(beforeAttempt: attempt + 1)
         let delay = max(policyDelay, error.retryAfter ?? 0)
@@ -286,7 +341,7 @@ struct NetworkClient {
                 throw APIError.cancelled
             }
         }
-        return try await perform(request, attempt: attempt + 1)
+        return true
     }
 
     /// Liest `Retry-After` als Sekunden oder als HTTP-Datum (spec-ios §10).
@@ -337,5 +392,39 @@ struct NetworkClient {
             )
         }
         return decoder
+    }
+}
+
+extension NetworkClient {
+    /// Client für „Test Verbindung“, der HTTP-Redirects nicht folgt.
+    ///
+    /// Zweck: Cloudflare Access antwortet unauthentifiziert mit 302 auf
+    /// `*.cloudflareaccess.com`; eine Session, die dem Redirect folgt, liefert
+    /// danach 200-HTML und verdeckt damit die Ursache (MARAAA-132 §5 B2).
+    static let connectionTest = NetworkClient(session: redirectBlockingSession)
+
+    private static let redirectBlockingSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        return URLSession(
+            configuration: configuration,
+            delegate: RedirectBlocker(),
+            delegateQueue: nil
+        )
+    }()
+}
+
+/// Verwirft Weiterleitungen, damit der 302 mit seinem `Location`-Header
+/// sichtbar bleibt; `completionHandler(nil)` liefert die Antwort unverändert
+/// an den Aufrufer.
+private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
