@@ -30,7 +30,7 @@ final class MealieRepository {
     /// Die Cache-Entity `Recipe` (I2) hat einen eindeutigen `id`; ein Rezept
     /// kann in der Bibliothek **und** mehrfach im Wochenplan stehen. Ohne
     /// Präfix würde jeder weitere Plan-Eintrag den vorherigen überschreiben.
-    static let planCachePrefix = "plan:"
+    static let planCachePrefix = MealieMealPlanItem.cachePrefix
 
     private let client: NetworkClient
     private let context: ModelContext
@@ -88,7 +88,16 @@ final class MealieRepository {
             totalPages = max(response.pagination.totalPages, page)
             page += 1
         }
-        return entries.compactMap { $0.normalize() }
+        var unique: [MealieMealPlanItem] = []
+        var seen = Set<String>()
+        for item in entries.compactMap({ $0.normalize() }) {
+            // Die Cache-ID ist bewusst inhaltsbasiert (Freitext hat keine
+            // Rezept-ID); identische Doppel-Einträge desselben Tages und
+            // derselben Mahlzeit dürfen keine doppelte SwiftUI-ID erzeugen.
+            guard seen.insert(item.id).inserted else { continue }
+            unique.append(item)
+        }
+        return unique
     }
 
     // MARK: - Netz: Bibliothek
@@ -151,14 +160,18 @@ final class MealieRepository {
 
     /// Wandelt eine Rezept-Zusammenfassung in eine Zeile der Bibliothek.
     /// `nil`, wenn weder `id` noch `slug` vorhanden ist (nicht adressierbar).
+    ///
+    /// Die Bild-URL entsteht aus der Rezept-ID, nicht aus `summary.image`:
+    /// Mealie liefert dort nur ein Cache-Token (Demo: `"4LEY"`).
     func row(from summary: MealieRecipeSummary) -> MealieRecipeRow? {
-        let identifier = MealieText.nonEmpty(summary.id) ?? MealieText.nonEmpty(summary.slug)
+        let recipeID = MealieText.nonEmpty(summary.id)
+        let identifier = recipeID ?? MealieText.nonEmpty(summary.slug)
         guard let identifier else { return nil }
         return MealieRecipeRow(
             id: identifier,
             name: MealieText.nonEmpty(summary.name) ?? MealieText.nonEmpty(summary.slug) ?? identifier,
             slug: MealieText.nonEmpty(summary.slug),
-            imageURL: imageURL(for: summary.image?.path),
+            imageURL: recipeID.flatMap { imageURL(forRecipeID: $0) },
             totalTime: MealieText.nonEmpty(summary.totalTime),
             servings: summary.recipeServings ?? 0
         )
@@ -166,36 +179,61 @@ final class MealieRepository {
 
     /// Erlaubte Schemes für Bild-URLs aus der Mealie-Antwort (G2-Befund 10).
     ///
-    /// Nur `https`: `file:`/`data:`-URLs haben in `AsyncImage` nichts zu suchen,
-    /// und die Basis-URL ist seit I2 ohnehin https-pflichtig.
+    /// Nur `https`: `file:`/`data:`-URLs haben in einem Bild-Loader nichts zu
+    /// suchen, und die Basis-URL ist seit I2 ohnehin https-pflichtig.
     static let allowedImageSchemes: Set<String> = ["https"]
 
-    /// Macht aus Mealies relativem Bildpfad (`/api/media/…`) eine absolute URL.
+    /// Bild-URL eines Rezepts: `{basis}/media/recipes/{id}/images/original.webp`.
     ///
-    /// Serverwerte werden vor der URL-Bildung geprüft: absolute URLs nur mit
-    /// einem Scheme aus `allowedImageSchemes`, relative Pfade werden in
-    /// Einzelsegmente zerlegt, prozentkodiert (`/` und `%` ausgenommen) und an
-    /// den https-Origin der Basis-URL gehängt. `nil` bei fehlendem Pfad,
-    /// fehlender Basis-URL oder nicht erlaubtem Scheme — ein fehlendes Bild ist
-    /// kein Fehlerzustand des Tabs.
-    func imageURL(for rawPath: String?) -> URL? {
-        guard let path = MealieText.nonEmpty(rawPath) else { return nil }
-        if let absolute = URL(string: path), let scheme = absolute.scheme {
-            guard Self.allowedImageSchemes.contains(scheme.lowercased()) else { return nil }
-            return absolute
-        }
+    /// `basis` ist die API-Basis-URL (`…/api`, §2.4). Die Rezept-ID wird als
+    /// einzelnes Pfad-Segment kodiert, damit ein Serverwert keine zusätzlichen
+    /// Segmente einschleusen kann. `nil` bei fehlender ID, fehlender Basis-URL
+    /// oder nicht erlaubtem Scheme — ein fehlendes Bild ist kein Fehlerzustand
+    /// des Tabs.
+    func imageURL(forRecipeID recipeID: String) -> URL? {
         guard let base = imageBaseURL,
               let scheme = base.scheme?.lowercased(),
               Self.allowedImageSchemes.contains(scheme),
               let host = base.host,
-              let encoded = Self.encodedPath(path)
+              let imagePath = Self.imagePath(forRecipeID: recipeID)
         else { return nil }
+        let basePath = base.path(percentEncoded: true)
+        let path = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
         var components = URLComponents()
         components.scheme = scheme
         components.host = host
         components.port = base.port
-        components.percentEncodedPath = encoded
+        components.percentEncodedPath = path + imagePath
         return components.url
+    }
+
+    /// Pfad der Bild-Route relativ zur API-Basis-URL; `nil` bei leerer ID.
+    static func imagePath(forRecipeID recipeID: String) -> String? {
+        guard let segment = pathSegment(recipeID) else { return nil }
+        return "/media/recipes/\(segment)/images/original.webp"
+    }
+
+    /// Lädt die Bild-Bytes eines Rezepts über `NetworkClient.send`.
+    ///
+    /// Zweck: `NetworkClient` ist die einzige Stelle der Header-Injektion
+    /// (spec-ios §8); nur so erreichen Cloudflare-Access- und Bearer-Header den
+    /// Bild-Endpunkt. `URLSession.shared` kann das nicht.
+    /// - Throws: `APIError`, wenn ID, Konfiguration oder Transport scheitern;
+    ///   `APIError.emptyResponse` bei leerer Antwort.
+    func fetchImageData(forRecipeID recipeID: String) async throws -> Data {
+        guard let path = Self.imagePath(forRecipeID: recipeID) else {
+            throw APIError.invalidRequest("Ungültige Rezept-ID.")
+        }
+        let data = try await client.send(
+            APIRequest(
+                method: .get,
+                path: path,
+                accept: "image/webp,image/*"
+            ),
+            for: .mealie
+        )
+        guard !data.isEmpty else { throw APIError.emptyResponse }
+        return data
     }
 
     /// Kodiert einen Serverwert als einzelnes Pfad-Segment.
@@ -211,24 +249,6 @@ final class MealieRepository {
         return trimmed.addingPercentEncoding(withAllowedCharacters: allowed)
     }
 
-    /// Kodiert einen relativen Bildpfad segmentweise; `nil`, wenn nichts übrig
-    /// bleibt.
-    ///
-    /// `.`/`..`-Segmente werden verworfen, damit ein Serverwert nicht aus dem
-    /// erwarteten Pfad herausklettern kann.
-    static func encodedPath(_ raw: String) -> String? {
-        let segments = raw
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .map(String.init)
-            .filter { $0 != "." && $0 != ".." }
-        guard !segments.isEmpty else { return nil }
-        var allowed = CharacterSet.urlPathAllowed
-        allowed.remove(charactersIn: "/%")
-        let encoded = segments.compactMap { $0.addingPercentEncoding(withAllowedCharacters: allowed) }
-        guard encoded.count == segments.count else { return nil }
-        return "/" + encoded.joined(separator: "/")
-    }
-
     // MARK: - Cache: Wochenplan
 
     /// Plan-Zeilen aus dem Cache, nach Tag und Mahlzeit sortiert.
@@ -237,11 +257,10 @@ final class MealieRepository {
             .filter { $0.id.hasPrefix(Self.planCachePrefix) }
         return rows.compactMap { row -> MealieMealPlanItem? in
             guard let date = row.date else { return nil }
-            let recipeID = Self.recipeID(fromPlanCacheID: row.id) ?? row.id
             return MealieMealPlanItem(
                 date: MealieDay.text(for: date, calendar: calendar),
                 mealType: row.mealType,
-                recipeID: recipeID,
+                recipeID: Self.recipeID(fromPlanCacheID: row.id),
                 recipeName: row.name,
                 recipeScale: row.recipeScale
             )
@@ -296,7 +315,7 @@ final class MealieRepository {
                 id: row.id,
                 name: row.name,
                 slug: nil,
-                imageURL: imageURL(for: row.imageURL),
+                imageURL: storedImageURL(row.imageURL),
                 totalTime: row.totalTime,
                 servings: 0
             )
@@ -336,19 +355,32 @@ final class MealieRepository {
 
     // MARK: - Cache-IDs
 
-    /// `plan:{date}:{meal_type}:{recipe_id}` — stabil und kollisionsfrei.
+    /// `plan:{date}:{meal_type}:{recipe_id}` bzw. `plan:text:{hash}` —
+    /// stabil und kollisionsfrei.
     static func planCacheID(for item: MealieMealPlanItem) -> String {
-        "\(planCachePrefix)\(item.date):\(item.mealType):\(item.recipeID)"
+        item.id
     }
 
-    /// Liest die Mealie-Rezept-ID aus einer Plan-Cache-ID zurück.
+    /// Liest die Mealie-Rezept-ID aus einer Plan-Cache-ID zurück; `nil` für
+    /// Freitext-Zeilen (`plan:text:…`).
     static func recipeID(fromPlanCacheID id: String) -> String? {
+        guard !id.hasPrefix(MealieMealPlanItem.textPrefix) else { return nil }
         let parts = id.split(separator: ":", maxSplits: 3, omittingEmptySubsequences: false)
         guard parts.count == 4, parts[0] == "plan" else { return nil }
         return String(parts[3])
     }
 
     // MARK: - Intern
+
+    /// Prüft eine gespeicherte absolute Bild-URL aus dem Cache; nur `https`.
+    private func storedImageURL(_ raw: String?) -> URL? {
+        guard let raw = MealieText.nonEmpty(raw),
+              let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              Self.allowedImageSchemes.contains(scheme)
+        else { return nil }
+        return url
+    }
 
     private func planCacheByID() throws -> [String: Recipe] {
         let rows = try context.fetch(FetchDescriptor<Recipe>()).filter { $0.id.hasPrefix(Self.planCachePrefix) }

@@ -103,6 +103,7 @@ private struct MealieContentView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .top, spacing: 0) {
             areaPicker
         }
@@ -152,11 +153,19 @@ private struct MealieContentView: View {
         UnifiedListItemView(
             item.recipeName,
             subtitle: MealieMealType.label(item.mealType),
-            systemImage: "fork.knife"
+            systemImage: item.isTextEntry ? "text.alignleft" : "fork.knife"
         ) {
-            Text(scaleLabel(item.recipeScale))
-                .font(DesignTokens.Typography.footnote)
-                .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+            // Freitext-Zeilen (z. B. „Reste“) haben kein Rezept und damit auch
+            // keine Zutaten-Aktion; ohne `recipeID` gibt es nichts nachzuladen.
+            if item.isTextEntry {
+                Text("Freitext")
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+            } else {
+                Text(scaleLabel(item.recipeScale))
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+            }
         }
     }
 
@@ -237,28 +246,22 @@ private struct MealieContentView: View {
         }
     }
 
+    /// Rezeptbild über den authentifizierten Loader; Platzhalter, wenn die
+    /// Mealie-Antwort keine Rezept-ID für die Bild-Route hatte. Ein direkter
+    /// `URLSession`-Aufruf lädt ohne CF-/Bearer-Header und ist deshalb tabu.
     @ViewBuilder
     private func thumbnail(_ row: MealieRecipeRow) -> some View {
-        AsyncImage(url: row.imageURL) { phase in
-            switch phase {
-            case .empty:
-                ProgressView()
-            case .success(let image):
-                image
-                    .resizable()
-                    .scaledToFill()
-            case .failure:
-                placeholderImage
-            @unknown default:
-                placeholderImage
-            }
+        if row.imageURL != nil {
+            MealieImageView(recipeID: row.id, repository: model.imageRepository)
+        } else {
+            placeholderImage
+                .frame(width: 48, height: 48)
+                .background(DesignTokens.Palette.tertiaryBackground)
+                .clipShape(
+                    RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)
+                )
+                .accessibilityHidden(true)
         }
-        .frame(width: 48, height: 48)
-        .background(DesignTokens.Palette.tertiaryBackground)
-        .clipShape(
-            RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)
-        )
-        .accessibilityHidden(true)
     }
 
     private var placeholderImage: some View {

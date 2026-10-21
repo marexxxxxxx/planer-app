@@ -71,6 +71,9 @@ final class MealieViewModel: ObservableObject {
     private var nextPage = 1
     private var searchTask: Task<Void, Never>?
 
+    /// Repository für den authentifizierten Bild-Loader der Ansicht.
+    var imageRepository: MealieRepository { repository }
+
     init(repository: MealieRepository, grocy: GrocyRepository, perPage: Int = 50) {
         self.repository = repository
         self.grocy = grocy

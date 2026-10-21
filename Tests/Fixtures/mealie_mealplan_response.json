@@ -1,0 +1,74 @@
+{
+  "page": 1,
+  "per_page": 50,
+  "total": 4,
+  "total_pages": 1,
+  "items": [
+    {
+      "id": "5d0c9a4e-2f71-4b8d-9c6a-1e3f7b2a5c80",
+      "groupId": "b2a4c6d8-0e1f-4a3b-8c5d-6e7f8a9b0c1d",
+      "userId": "7f3e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b",
+      "householdId": "c4d6e8f0-1a2b-4c3d-9e5f-7a8b9c0d1e2f",
+      "date": "2026-10-21",
+      "entryType": "dinner",
+      "title": null,
+      "text": null,
+      "recipeId": "0f4b9d3e-1c2a-4f6b-8d7e-9a1c2b3d4e5f",
+      "recipeScale": 1.5,
+      "recipe": {
+        "id": "0f4b9d3e-1c2a-4f6b-8d7e-9a1c2b3d4e5f",
+        "name": "Linsensuppe",
+        "slug": "linsensuppe",
+        "image": "4LEY",
+        "totalTime": "45 Minuten",
+        "recipeServings": 4
+      }
+    },
+    {
+      "id": "a8e2c4f6-1b3d-4e5f-9a7b-2c4d6e8f0a1b",
+      "groupId": "b2a4c6d8-0e1f-4a3b-8c5d-6e7f8a9b0c1d",
+      "userId": "7f3e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b",
+      "householdId": "c4d6e8f0-1a2b-4c3d-9e5f-7a8b9c0d1e2f",
+      "date": "2026-10-22",
+      "entryType": "lunch",
+      "title": null,
+      "text": "Reste",
+      "recipeId": null,
+      "recipeScale": null,
+      "recipe": null
+    },
+    {
+      "id": "e1f3a5c7-2d4b-4f6a-8c9e-0b1d3f5a7c9e",
+      "groupId": "b2a4c6d8-0e1f-4a3b-8c5d-6e7f8a9b0c1d",
+      "userId": "7f3e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b",
+      "householdId": "c4d6e8f0-1a2b-4c3d-9e5f-7a8b9c0d1e2f",
+      "date": "2026-10-23",
+      "entryType": "dinner",
+      "title": "Grillabend",
+      "text": "Grillabend mit Freunden",
+      "recipeId": null,
+      "recipeScale": null,
+      "recipe": null
+    },
+    {
+      "id": "c7e9b1d3-4f6a-4c8e-9b0d-2f4a6c8e0b1d",
+      "groupId": "b2a4c6d8-0e1f-4a3b-8c5d-6e7f8a9b0c1d",
+      "userId": "7f3e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b",
+      "householdId": "c4d6e8f0-1a2b-4c3d-9e5f-7a8b9c0d1e2f",
+      "date": "2026-10-25",
+      "entryType": "dessert",
+      "title": null,
+      "text": null,
+      "recipeId": "a1e5c8d4-6f2b-4c93-8d07-3e9b6a2f1c54",
+      "recipeScale": 2,
+      "recipe": {
+        "id": "a1e5c8d4-6f2b-4c93-8d07-3e9b6a2f1c54",
+        "name": "Apfelkuchen",
+        "slug": "apfelkuchen",
+        "image": "9KQ2",
+        "totalTime": "90 Minuten",
+        "recipeServings": 8
+      }
+    }
+  ]
+}

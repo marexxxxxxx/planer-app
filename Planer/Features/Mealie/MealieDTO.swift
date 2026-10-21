@@ -5,6 +5,7 @@
 //  Wire-Formate der Mealie-v2-API und ihre Normalform (spec-ios §2.4, §3.3).
 //
 
+import CryptoKit
 import Foundation
 
 /// Kleine Text-Helfer der Mealie-Schicht.
@@ -115,6 +116,8 @@ struct MealiePlanEntry: Decodable, Equatable {
     let recipeId: String?
     let recipeScale: Double?
     let title: String?
+    /// Freitext eines Eintrags ohne Rezept (`ReadPlanEntry.text`, z. B. „Reste“).
+    let text: String?
     let recipe: MealieRecipeSummary?
 
     enum CodingKeys: String, CodingKey {
@@ -123,28 +126,39 @@ struct MealiePlanEntry: Decodable, Equatable {
         case recipeId
         case recipeScale
         case title
+        case text
         case recipe
     }
 
     /// Normalform aus §2.4: `{date, meal_type, recipe_id, recipe_name, recipe_scale}`.
     ///
-    /// `nil` für Freitext-Einträge ohne Rezeptbezug (`title`/`text`, z. B.
-    /// „Reste“): die Normalform aus §2.4 verlangt eine `recipe_id`, und ein
-    /// erfundenes Ersatz-Feld wäre keine Rezept-ID. Solche Einträge fehlen
-    /// damit im Wochenplan (siehe Abschlussbericht, OFFEN).
+    /// Freitext-Einträge (`recipeId = null`, z. B. „Reste“) behalten ihre
+    /// `recipe_id = nil`; ihr Name kommt aus `title`, sonst aus `text`. Ohne
+    /// beides gibt es nichts anzuzeigen und die Zeile entfällt.
     func normalize() -> MealieMealPlanItem? {
-        guard let recipeID = MealieText.nonEmpty(recipeId),
-              let day = MealieText.nonEmpty(date)
-        else {
+        guard let day = MealieText.nonEmpty(date) else { return nil }
+        let mealType = MealieText.trimmed(entryType)
+
+        if let recipeID = MealieText.nonEmpty(recipeId) {
+            let name = MealieText.nonEmpty(recipe?.name)
+                ?? MealieText.nonEmpty(title)
+                ?? recipeID
+            return MealieMealPlanItem(
+                date: day,
+                mealType: mealType,
+                recipeID: recipeID,
+                recipeName: name,
+                recipeScale: recipeScale ?? 1
+            )
+        }
+
+        guard let name = MealieText.nonEmpty(title) ?? MealieText.nonEmpty(text) else {
             return nil
         }
-        let name = MealieText.nonEmpty(recipe?.name)
-            ?? MealieText.nonEmpty(title)
-            ?? recipeID
         return MealieMealPlanItem(
             date: day,
-            mealType: MealieText.trimmed(entryType),
-            recipeID: recipeID,
+            mealType: mealType,
+            recipeID: nil,
             recipeName: name,
             recipeScale: recipeScale ?? 1
         )
@@ -169,16 +183,42 @@ struct MealieMealPlanPage: Decodable, Equatable {
 
 /// Normalform einer geplanten Mahlzeit (spec-ios §2.4, Schema §3.4).
 struct MealieMealPlanItem: Equatable, Identifiable, Sendable {
+    /// Präfix aller Wochenplan-Cache-IDs; trennt Plan- von Bibliothekszeilen.
+    static let cachePrefix = "plan:"
+    /// Präfix der Cache-IDs von Freitext-Zeilen ohne Rezept.
+    static let textPrefix = "plan:text:"
+
     let date: String
     let mealType: String
-    let recipeID: String
+    /// `nil` bei Freitext (z. B. „Reste“) — es gibt kein Rezept zum Nachladen.
+    let recipeID: String?
     let recipeName: String
     let recipeScale: Double
 
-    var id: String { "\(date)|\(mealType)|\(recipeID)" }
+    /// Wahr für Zeilen ohne Rezeptbezug; die Ansicht blendet dafür die
+    /// Zutaten-Aktion aus.
+    var isTextEntry: Bool { recipeID == nil }
+
+    /// Stabile Cache-ID. Rezeptzeilen behalten das bisherige Schema; Freitext
+    /// hat keine Rezept-ID und bekommt deshalb einen Inhalts-Hash, damit
+    /// derselbe Eintrag bei jedem Laden dieselbe Zeile trifft.
+    var id: String {
+        guard let recipeID else {
+            return Self.textPrefix + Self.hashPrefix("\(date)|\(mealType)|\(recipeName)")
+        }
+        return "\(Self.cachePrefix)\(date):\(mealType):\(recipeID)"
+    }
 
     /// Anzeige-Reihenfolge innerhalb eines Tages.
     var sortIndex: Int { MealieMealType.sortIndex(mealType) }
+
+    /// Erste 8 Bytes (16 Hex-Zeichen) des SHA-256 über den Eintragsinhalt.
+    static func hashPrefix(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
 }
 
 /// Seite der Rezept-Bibliothek aus `GET /recipes` (`PaginationBase_RecipeSummary_`).
@@ -197,26 +237,15 @@ struct MealieRecipePage: Decodable, Equatable {
     }
 }
 
-/// Bildverweis eines Rezepts.
-///
-/// Mealie liefert `image` als String (Pfad) oder `null`; das OpenAPI-Schema
-/// lässt den Typ offen. Jede andere Form gilt als „kein Bild“, damit ein
-/// unbekanntes Bildfeld nicht die ganze Bibliothek unlesbar macht.
-struct MealieImageReference: Decodable, Equatable, Sendable {
-    let path: String?
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        path = try? container.decode(String.self)
-    }
-}
-
 /// Rezept-Zusammenfassung (`RecipeSummary`) aus Bibliothek und Wochenplan.
+///
+/// `image` der API ist ein Cache-Token (Demo: `"4LEY"`), kein Pfad; es wird
+/// deshalb nicht dekodiert. Die Bild-URL entsteht in `MealieRepository` aus der
+/// Rezept-ID.
 struct MealieRecipeSummary: Decodable, Equatable, Sendable {
     let id: String?
     let name: String?
     let slug: String?
-    let image: MealieImageReference?
     let totalTime: String?
     let recipeServings: Double?
 }
@@ -284,6 +313,10 @@ struct MealieIngredient: Equatable, Sendable, Identifiable {
 ///
 /// `slug` ist nur nach einem Online-Laden bekannt; die Cache-Entity `Recipe`
 /// aus I2 hat kein Slug-Feld (spec-ios §3.3).
+/// `imageURL` ist gesetzt, wenn `id` die Mealie-Rezept-ID ist: nur dann lässt
+/// sich die Bild-Route `/media/recipes/{id}/images/original.webp` bilden. Für
+/// die Anzeige lädt `MealieImageView` die Bytes erneut über `NetworkClient`,
+/// weil `URLSession.shared` die CF-/Bearer-Header nicht kennt.
 struct MealieRecipeRow: Identifiable, Equatable {
     let id: String
     let name: String
