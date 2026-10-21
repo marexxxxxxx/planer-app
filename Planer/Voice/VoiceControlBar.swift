@@ -68,6 +68,16 @@ struct VoiceControlBar: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // §4 Punkt 2: solange der Knopf nicht bedienbar ist, bleibt der
+            // Grund sichtbar — auch ohne Fehlerzustand und ohne „Zurücksetzen“.
+            if let hint = voice.listenBlockedHint, voice.notice != hint {
+                Text(hint)
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(Text(hint))
+            }
+
             if voice.triggerMode == .handsFree, voice.isHandsFreeActive {
                 Text("Freihändig hört nur zu, solange die App offen ist.")
                     .font(DesignTokens.Typography.footnote)
@@ -106,14 +116,13 @@ struct VoiceControlBar: View {
         if voice.state.isListening {
             return "Diktat beenden"
         }
-        switch voice.triggerMode {
-        case .pushToTalk:
-            return "Diktat starten"
-        case .handsFree:
-            return "Freihändig zuhören starten"
-        case .readAloudOnly:
-            return "Diktat ist ausgeschaltet"
+        // §4 Punkt 3, §11.1: derselbe Text wie der dauerhafte Hinweis.
+        if let hint = voice.listenBlockedHint {
+            return hint
         }
+        return voice.triggerMode == .handsFree
+            ? "Freihändig zuhören starten"
+            : "Diktat starten"
     }
 }
 

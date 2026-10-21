@@ -7,6 +7,7 @@
 //
 
 import AVFoundation
+import Speech
 import SwiftUI
 
 /// Der Vertrag, den der Chat für die Sprachschicht braucht (spec-voice §11).
@@ -88,6 +89,16 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
     /// Einmaliger Hinweis (Zeitlimit, Kürzung, „Nichts verstanden“).
     @Published private(set) var notice: String?
 
+    /// Ob dieses Gerät deutsches Diktat ohne Netz kann — vor jedem Start neu
+    /// geprüft und veröffentlicht, damit der Knopf nicht ins Leere läuft
+    /// (spec-voice §4 Punkt 1–3).
+    @Published private(set) var availability: DictationAvailability = .bereit
+
+    /// Die beiden Freigaben, zuletzt gelesen beim Start oder Zurücksetzen
+    /// (spec-voice §11.1).
+    @Published private(set) var microphonePermission: VoicePermissionStatus = .nichtGefragt
+    @Published private(set) var speechPermission: VoicePermissionStatus = .nichtGefragt
+
     /// Vorlesen von Agent-Antworten und To-Dos (persistiert).
     @Published var readAloudEnabled: Bool {
         didSet {
@@ -156,6 +167,13 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
     private var handsFreeActive = false
     private var isForeground = true
 
+    /// Antwort-Deltas, die während des Zuhörens eintreffen (I-V1).
+    ///
+    /// Sprechen ist beim Zuhören verboten, Verwerfen aber auch: der Satzpuffer
+    /// bleibt unberührt, die Deltas warten bis zum Ende des Diktats.
+    private var deferredDelta = ""
+    private var deferredStreamFinished = false
+
     /// Dienste sind injizierbar; die Vorgaben sind die echten Dienste aus
     /// V1 und V2. Beide werden direkt angesprochen, weil nur sie die
     /// Ergänzungssignale `onIdle` (V1) und `onFailure` (V2) anbieten.
@@ -190,18 +208,74 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
                 self.handleDictationFailure(error)
             }
         }
+
+        // §4 Punkt 1: die Fähigkeit wird nicht zwischengespeichert, sondern
+        // bei jedem Start und jedem Zurücksetzen neu gelesen.
+        self.availability = dictating.availability
+        self.microphonePermission = VoicePermissions.microphoneStatus
+        self.speechPermission = VoiceCoordinator.speechPermissionStatus
     }
 
     // MARK: Abgeleiteter Zustand für die Oberfläche
 
-    /// Ob der Mikrofon-Knopf überhaupt etwas bewirken kann.
+    /// Ob der Mikrofon-Knopf überhaupt etwas bewirken kann (spec-voice §4
+    /// Punkt 3, §11.1): Freigaben, Gerätefähigkeit und Einstellung zusammen.
     var canListen: Bool {
-        dictationEnabled && triggerMode != .readAloudOnly
+        listenBlockedHint == nil
+    }
+
+    /// Warum der Mikrofon-Knopf nichts bewirken kann; `nil` heißt bedienbar.
+    ///
+    /// Derselbe Text steht als Barrierefreiheits-Label am Knopf und als
+    /// dauerhafter Hinweis in der Leiste (§4 Punkt 2 und 3).
+    var listenBlockedHint: String? {
+        if triggerMode == .readAloudOnly {
+            return "Diktat ist ausgeschaltet — nur Vorlesen."
+        }
+        if !dictationEnabled {
+            return "Diktat ist ausgeschaltet."
+        }
+        if let hinweis = availability.hinweis {
+            return hinweis
+        }
+        if speechPermission == .verweigert {
+            return VoiceFailure.erkennungVerweigert.errorDescription
+        }
+        if microphonePermission == .verweigert {
+            return VoiceFailure.mikrofonVerweigert.errorDescription
+        }
+        return nil
     }
 
     /// Ob gerade freihändig zugehört wird (§8.3).
     var isHandsFreeActive: Bool {
         handsFreeActive
+    }
+
+    /// Liest die beiden Freigaben neu (§11.1).
+    private func refreshPermissions() {
+        microphonePermission = VoicePermissions.microphoneStatus
+        speechPermission = Self.speechPermissionStatus
+    }
+
+    /// Prüft die Gerätefähigkeit neu — vor jedem Diktat (§4 Punkt 1).
+    private func refreshAvailability() {
+        availability = dictating.availability
+    }
+
+    /// Status der Spracherkennung ohne Systemdialog; das Diktat selbst bleibt
+    /// hinter `Dictating`.
+    private static var speechPermissionStatus: VoicePermissionStatus {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            return .erlaubt
+        case .denied, .restricted:
+            return .verweigert
+        case .notDetermined:
+            return .nichtGefragt
+        @unknown default:
+            return .verweigert
+        }
     }
 
     /// Statuszeile der Sprachleiste.
@@ -243,6 +317,11 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
             dictationTimer = nil
             dictating.stop()
             liveTranscript = ""
+            // §8.1/T4: ein Fehler beendet auch freihändig — Flag und
+            // 30-Minuten-Deadline dürfen nicht weiterlaufen.
+            if case .fehler = newState {
+                teardownHandsFree()
+            }
         case .sprechend:
             synthesizer.stop()
             sentenceBuffer.reset()
@@ -295,9 +374,7 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
 
     /// Beendet das Diktat (T3) und übernimmt das letzte Ergebnis.
     func stopListening() {
-        handsFreeActive = false
-        handsFreeDeadline?.cancel()
-        handsFreeDeadline = nil
+        teardownHandsFree()
         endDictation(reason: .explicit)
     }
 
@@ -312,7 +389,7 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
                 startListening()
             }
         case .handsFree:
-            if handsFreeActive {
+            if handsFreeActive || state == .hoerend {
                 stopHandsFree()
             } else {
                 startHandsFree()
@@ -323,43 +400,86 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
     }
 
     /// Startet freihändiges Zuhören — nur im Vordergrund (§8.3).
+    ///
+    /// Das Flag gilt erst, wenn `beginListening` wirklich gestartet ist: sonst
+    /// behauptet die Leiste „Freihändig hört zu“, während der Zustand
+    /// `.fehler` ist, und die Deadline läuft ohne Aufnahme weiter.
     func startHandsFree() {
         guard triggerMode == .handsFree, canListen, isForeground else { return }
         guard !handsFreeActive else { return }
-        handsFreeActive = true
-        scheduleHandsFreeDeadline()
-        startListening()
+        notice = nil
+        // Barging-in (T6): erst die Ausgabe beenden, dann aufnehmen.
+        if state == .sprechend {
+            stopSpeaking()
+        }
+        startTask?.cancel()
+        startTask = Task { [weak self] in
+            guard let self else { return }
+            guard await self.beginListening() else { return }
+            guard self.triggerMode == .handsFree,
+                  self.isForeground,
+                  self.state == .hoerend
+            else {
+                self.teardownHandsFree()
+                self.endDictation(reason: .explicit)
+                return
+            }
+            self.handsFreeActive = true
+            self.scheduleHandsFreeDeadline()
+            // Die Sitzungslänge hängt am Modus; nach dem Setzen neu planen.
+            self.scheduleDictationTimer()
+        }
     }
 
     /// Beendet freihändiges Zuhören (Nutzeraktion).
     func stopHandsFree() {
-        handsFreeActive = false
-        handsFreeDeadline?.cancel()
-        handsFreeDeadline = nil
+        teardownHandsFree()
         endDictation(reason: .explicit)
     }
 
-    private func beginListening() async {
-        guard isForeground, state != .hoerend else { return }
+    /// Räumt Flag **und** 30-Minuten-Deadline in einem Schritt ab (§8.3).
+    private func teardownHandsFree() {
+        handsFreeActive = false
+        handsFreeDeadline?.cancel()
+        handsFreeDeadline = nil
+    }
+
+    /// Ein Fehler beendet das Diktat samt freihändigem Zustand (T4, §8.3).
+    private func fail(_ failure: VoiceFailure) {
+        teardownHandsFree()
+        transition(to: .fehler(failure))
+    }
+
+    @discardableResult
+    private func beginListening() async -> Bool {
+        guard isForeground, state != .hoerend else { return false }
+
+        notice = nil
+        refreshAvailability()
+        refreshPermissions()
+
+        // §4 Punkt 1 und 2: ohne deutsches On-Device-Diktat startet die
+        // Erkennung nicht — und der Zustand bleibt `.stumm`. Ein `.fehler`
+        // hier würde mit „Zurücksetzen“ wieder in den Start führen.
+        guard availability.istMoeglich else {
+            notice = availability.hinweis
+            return false
+        }
 
         guard await VoicePermissions.requestMicrophone() == .erlaubt else {
-            transition(to: .fehler(.mikrofonVerweigert))
-            return
+            refreshPermissions()
+            fail(.mikrofonVerweigert)
+            return false
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return false }
         guard await VoicePermissions.requestSpeechRecognition() == .erlaubt else {
-            transition(to: .fehler(.erkennungVerweigert))
-            return
+            refreshPermissions()
+            fail(.erkennungVerweigert)
+            return false
         }
-        guard !Task.isCancelled else { return }
-        // §4: ohne deutsches On-Device-Diktat startet die Erkennung nicht —
-        // es gibt keinen Netzrückfall.
-        guard dictating.supportsGermanOnDevice else {
-            transition(to: .fehler(.erkennungNichtMoeglich))
-            return
-        }
+        guard !Task.isCancelled else { return false }
         // §8.3: kein Zuhören, wenn die App inzwischen im Hintergrund ist.
-        guard isForeground else { return }
+        guard isForeground else { return false }
 
         do {
             try activateSession(forRecording: true)
@@ -380,13 +500,22 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
                 }
             )
         } catch {
-            transition(to: .fehler(failure(for: error)))
-            return
+            let mapped = failure(for: error)
+            // Die Fähigkeit kann zwischen Prüfung und Start verschwinden; dann
+            // gilt derselbe Fallback wie oben (§4 Punkt 2).
+            guard mapped != .erkennungNichtMoeglich else {
+                refreshAvailability()
+                notice = availability.hinweis ?? VoiceFailure.erkennungNichtMoeglich.errorDescription
+                return false
+            }
+            fail(mapped)
+            return false
         }
 
         liveTranscript = ""
         transition(to: .hoerend)
         scheduleDictationTimer()
+        return true
     }
 
     /// Startet das Diktat in einer Aufgabe; ein noch laufender Start wird
@@ -426,25 +555,30 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
         transition(to: .stumm)
         if let transcript {
             deliver(transcript)
+        } else if reason != .deadline {
+            // §11.1: Stille liefert bewusst kein `onFinal` — der Hinweis ist
+            // die einzige Rückmeldung („kein leerer Eintrag in draft“).
+            notice = "Nichts verstanden."
         }
         // §8.3: freihändig läuft nach jedem Ergebnis weiter — aber nur, wenn
         // die App im Vordergrund ist, der Modus noch freihändig ist und der
         // Nutzer nicht selbst beendet hat.
-        guard handsFreeActive, isForeground, triggerMode == .handsFree, reason != .explicit else {
+        if handsFreeActive, isForeground, triggerMode == .handsFree, reason != .explicit {
+            beginListeningSoon()
             return
         }
-        beginListeningSoon()
+        // Erst wenn das Diktat wirklich endet, werden die während des Zuhörens
+        // zurückgehaltenen Deltas gesprochen (I-V1, §6.3).
+        speakDeferredDelta()
     }
 
     /// Übergibt das Diktat an den Entwurf — ohne automatisches Senden (§6).
+    ///
+    /// Leerer Text erreicht diese Stelle nicht: `finishSession` setzt für
+    /// Stille den Hinweis (§11.1), und `appendDictation` verwirft Leeres.
     private func deliver(_ transcript: String) {
-        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            notice = "Nichts verstanden."
-            return
-        }
         guard let onTranscript else { return }
-
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count > configuration.maxTranscriptCharacters {
             notice = "Diktat auf \(configuration.maxTranscriptCharacters) Zeichen gekürzt."
             onTranscript(String(trimmed.prefix(configuration.maxTranscriptCharacters)))
@@ -455,8 +589,7 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
 
     private func handleDictationFailure(_ error: DictationError) {
         guard state == .hoerend else { return }
-        handsFreeActive = false
-        transition(to: .fehler(failure(for: error)))
+        fail(failure(for: error))
     }
 
     private func scheduleDictationTimer() {
@@ -491,8 +624,7 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
     private func handsFreeLimitReached() {
         guard handsFreeActive else { return }
         let minutes = Int(configuration.handsFreeMaxMinutes)
-        handsFreeActive = false
-        handsFreeDeadline = nil
+        teardownHandsFree()
         notice = "Freihändig beendet nach \(minutes) Minuten — das kostet Akku."
         endDictation(reason: .explicit)
     }
@@ -508,21 +640,52 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
     }
 
     /// Satzpuffer aus dem Antwortstrom füllen (N2).
+    ///
+    /// Während des Zuhörens darf nicht gesprochen werden (I-V1). Das Delta
+    /// geht deshalb **nicht** in den Puffer — sonst entstehen fertige Sätze,
+    /// die `enqueue` verwirft, und der Anfang der Antwort ist dauerhaft weg.
+    /// Stattdessen wartet der Text bis zum Ende des Diktats.
     func ingestAssistantDelta(_ delta: String) {
         guard readAloudEnabled else { return }
+        guard state != .hoerend else {
+            deferredDelta += delta
+            return
+        }
         enqueue(sentenceBuffer.append(delta))
     }
 
     /// Restpuffer nach der Runde ausgeben (N3).
     func finishAssistantStream() {
         guard readAloudEnabled else { return }
+        guard state != .hoerend else {
+            deferredStreamFinished = true
+            return
+        }
         enqueue(sentenceBuffer.flush())
+    }
+
+    /// Holt die während des Zuhörens zurückgehaltenen Deltas nach (§6.3).
+    private func speakDeferredDelta() {
+        guard state != .hoerend else { return }
+        let delta = deferredDelta
+        let streamFinished = deferredStreamFinished
+        deferredDelta = ""
+        deferredStreamFinished = false
+        guard readAloudEnabled, !delta.isEmpty else { return }
+
+        var sentences = sentenceBuffer.append(delta)
+        if streamFinished {
+            sentences += sentenceBuffer.flush()
+        }
+        enqueue(sentences)
     }
 
     /// Bricht das Vorlesen sofort ab (T5, N4/N5); mehrfach aufrufbar.
     func stopSpeaking() {
         synthesizer.stop()
         sentenceBuffer.reset()
+        deferredDelta = ""
+        deferredStreamFinished = false
         if state == .sprechend {
             transition(to: .stumm)
         }
@@ -534,6 +697,10 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
         notice = nil
         synthesizer.stop()
         sentenceBuffer.reset()
+        deferredDelta = ""
+        deferredStreamFinished = false
+        refreshAvailability()
+        refreshPermissions()
     }
 
     private func enqueue(_ sentences: [String]) {
@@ -597,15 +764,17 @@ final class VoiceCoordinator: ObservableObject, VoiceAssistant {
     func handleScenePhase(_ phase: ScenePhase) {
         guard phase == .active else {
             isForeground = false
-            handsFreeActive = false
-            handsFreeDeadline?.cancel()
-            handsFreeDeadline = nil
+            teardownHandsFree()
             endDictation(reason: .explicit)
             stopSpeaking()
             return
         }
-        // `.active` startet nichts von selbst (§8.3).
+        // `.active` startet nichts von selbst (§8.3) — aber die Gerätefähigkeit
+        // und die Freigaben werden neu gelesen, damit der Knopf nach einer
+        // Änderung in den iOS-Einstellungen wieder stimmt (§4 Punkt 1).
         isForeground = true
+        refreshAvailability()
+        refreshPermissions()
     }
 
     // MARK: Audio-Session (§8.1)

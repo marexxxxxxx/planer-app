@@ -44,9 +44,12 @@ struct ChatView: View {
                     optionsMenu
                 }
             }
-            .task {
+            .task { @MainActor in
                 // N1: `@StateObject` erlaubt keinen Environment-Zugriff im
                 // Initializer — die Verdrahtung passiert hier, vor `connect()`.
+                // `View.task` nimmt ein `@Sendable`-Closure; die beiden
+                // MainActor-Zugriffe unten brauchen deshalb die ausdrückliche
+                // Isolierung (wie TodosView.swift, begründet in GrocyView.swift).
                 viewModel.voice = voice
                 voice.onTranscript = { [weak viewModel] text in
                     viewModel?.appendDictation(text)
