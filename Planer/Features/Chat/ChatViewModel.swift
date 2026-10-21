@@ -531,7 +531,8 @@ final class ChatViewModel: ObservableObject {
         case .server(let status, _, _, _):
             return status >= 500
         case .unauthorized, .forbidden, .notFound, .conflict,
-             .rateLimited, .cancelled, .emptyResponse, .hermesLoginFailed:
+             .rateLimited, .cancelled, .emptyResponse, .hermesLoginFailed,
+             .hermesAuthenticationRequired:
             // Eine abgelehnte Hermes-Anmeldung behält ihre eigene Meldung und
             // wird nicht als „Sitzung nicht anlegbar“ umgeschrieben.
             return false
@@ -1064,6 +1065,9 @@ final class ChatViewModel: ObservableObject {
         case .unauthorized, .hermesLoginFailed:
             // Hermes meldet sich seit MARAAA-146 mit Benutzername/Passwort an.
             return "Hermes verweigert den Zugriff. Bitte Benutzername und Passwort in den Einstellungen prüfen."
+        case .hermesAuthenticationRequired:
+            // Ein 3xx ist ein Auth-Signal, kein roher HTTP-Status (MARAAA-154).
+            return error.errorDescription ?? "Hermes-Anmeldung erforderlich — Benutzername/Passwort prüfen."
         case .forbidden:
             return "Zugriff verweigert (403). Der Server erlaubt keine Sitzungs-Fortsetzung."
         case .notFound:

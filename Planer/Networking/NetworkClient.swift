@@ -78,6 +78,8 @@ struct NetworkClient {
     private let keychain: KeychainManager
     /// Obergrenze des 401-Bodys, aus dem der Re-Login-Grund gelesen wird.
     private static let maxAuthBodyBytes = 4_096
+    /// HTTP-Status, die als Weiterleitung gelten (MARAAA-154).
+    private static let redirectStatusCodes: Set<Int> = [301, 302, 303, 307, 308]
 
     init(
         session: URLSession = NetworkClient.cookieFreeSession,
@@ -108,9 +110,9 @@ struct NetworkClient {
     /// Zweck: Der Verbindungstest der Einstellungen muss Status und Body sehen,
     /// um 401, 403, 404 und die HTML-Anmeldeseite von Cloudflare Access zu
     /// unterscheiden; `send` wirft Nicht-2xx und verliert dabei den Body.
-    /// Grenze: wiederholt wie `send` nur GET bei Timeout/Offline/5xx. Einen
-    /// Redirect verfolgt nur der übergebene Client — für den Verbindungstest
-    /// ist das `NetworkClient.connectionTest`, der Redirects stehen lässt.
+    /// Grenze: wiederholt wie `send` nur GET bei Timeout/Offline/5xx. Für
+    /// Hermes werden Redirects nie verfolgt; der Verbindungstest nutzt für alle
+    /// Dienste `NetworkClient.connectionTest`, der Redirects stehen lässt.
     func sendRaw(
         _ request: APIRequest,
         for service: ServiceType
@@ -149,10 +151,10 @@ struct NetworkClient {
     /// dieselbe `makeURLRequest`/`injectHeaders`-Kette gebaut wie bei `send`.
     /// Grenze: **kein automatischer Retry** im Sinne von `send` — ein Strom
     /// wird nicht wiederholt; die aufrufende Schicht entscheidet. Ausnahme ist
-    /// die Hermes-Sitzung (MARAAA-146): ein 401 mit abgelaufenen Cookies löst
-    /// genau einen Re-Login und eine Wiederholung aus. Andere Nicht-2xx-
-    /// Antworten werden nicht geworfen, weil der Fehlertext im Strom stehen
-    /// kann: der Aufrufer prüft `response.statusCode` und liest den Body
+    /// die Hermes-Sitzung (MARAAA-146/154): ein 401 mit abgelaufenen Cookies
+    /// oder ein 3xx löst genau einen Re-Login und eine Wiederholung aus. Andere
+    /// Nicht-2xx-Antworten werden nicht geworfen, weil der Fehlertext im Strom
+    /// stehen kann: der Aufrufer prüft `response.statusCode` und liest den Body
     /// begrenzt. Nur ein Hermes-401 muss dafür vorher gelesen werden.
     func stream(_ request: APIRequest, for service: ServiceType) async throws -> StreamingResponse {
         let configuration = try loadConfiguration(for: service)
@@ -172,17 +174,22 @@ struct NetworkClient {
         didRelogin: Bool
     ) async throws -> StreamingResponse {
         do {
-            let (bytes, response) = try await session.bytes(for: urlRequest)
+            let (bytes, response) = try await urlSession(for: service).bytes(for: urlRequest)
             guard let http = response as? HTTPURLResponse else {
                 throw APIError.invalidResponse
             }
 
             // Der 401-Body entscheidet über den Re-Login und muss dafür aus dem
-            // Strom gelesen werden. Das betrifft ausschließlich Hermes; alle
-            // anderen Antworten bleiben ungepuffert.
-            if service == .hermes, http.statusCode == 401 {
-                let body = (try? await Self.collect(bytes, limit: Self.maxAuthBodyBytes)) ?? Data()
-                if !didRelogin, HermesAuthFailure.indicatesExpiredSession(body) {
+            // Strom gelesen werden. Ein 3xx bleibt ohne Body sichtbar; beide
+            // betreffen ausschließlich Hermes (MARAAA-146/154).
+            let redirect = service == .hermes && Self.isRedirect(http.statusCode)
+            if service == .hermes, http.statusCode == 401 || redirect {
+                var body = Data()
+                if http.statusCode == 401 {
+                    body = (try? await Self.collect(bytes, limit: Self.maxAuthBodyBytes)) ?? Data()
+                }
+                let expired = HermesAuthFailure.indicatesExpiredSession(body)
+                if !didRelogin, expired || redirect {
                     try await loginHermes(configuration: configuration)
                     var retried = urlRequest
                     injectHermesCookies(into: &retried)
@@ -192,6 +199,9 @@ struct NetworkClient {
                         configuration: configuration,
                         didRelogin: true
                     )
+                }
+                if redirect {
+                    throw Self.hermesRedirectError(http)
                 }
                 throw APIError.from(
                     status: http.statusCode,
@@ -319,6 +329,19 @@ struct NetworkClient {
 
     // MARK: - Ausführung und Retry
 
+    /// Wählt die Session je Dienst.
+    ///
+    /// Hermes läuft ausschließlich über die redirect-blockierende Session: Ein
+    /// 302 auf `/login` oder Cloudflare Access bleibt damit als Antwort sichtbar,
+    /// statt als GET-Wiederholung an einem POST-only-Endpunkt zu landen
+    /// (MARAAA-154). Mealie, Grocy und Dashboard behalten ihre bisherige Session.
+    private func urlSession(for service: ServiceType) -> URLSession {
+        if service == .hermes {
+            return NetworkClient.redirectBlockingSession
+        }
+        return session
+    }
+
     private func loadConfiguration(for service: ServiceType) throws -> ServiceConfiguration {
         do {
             return try ServiceConfiguration.load(service, keychain: keychain)
@@ -368,7 +391,7 @@ struct NetworkClient {
         // werden.
         let result: (data: Data, response: URLResponse)
         do {
-            result = try await session.data(for: request)
+            result = try await urlSession(for: service).data(for: request)
         } catch let error as URLError {
             if error.code == .cancelled {
                 throw APIError.cancelled
@@ -395,13 +418,15 @@ struct NetworkClient {
             throw APIError.invalidResponse
         }
 
-        // MARAAA-146: Ein Hermes-401 mit abgelaufener Sitzung wird genau einmal
-        // durch einen neuen Password-Login und eine Wiederholung ersetzt. Jeder
-        // andere 401 (auch der zweite nach dem Re-Login) bleibt ein Fehler.
-        if service == .hermes,
-           http.statusCode == 401,
-           !didRelogin,
-           HermesAuthFailure.indicatesExpiredSession(result.data) {
+        // MARAAA-146/154: Ein Hermes-401 mit abgelaufener Sitzung und jeder
+        // Hermes-3xx werden genau einmal durch einen neuen Password-Login und
+        // eine Wiederholung ersetzt. Der zweite 3xx ist ein Fehler, keine
+        // Schleife; der zweite 401 bleibt ebenfalls ein Fehler.
+        let expired = service == .hermes
+            && http.statusCode == 401
+            && HermesAuthFailure.indicatesExpiredSession(result.data)
+        let redirect = service == .hermes && Self.isRedirect(http.statusCode)
+        if !didRelogin, expired || redirect {
             try await loginHermes(configuration: configuration)
             var retried = request
             injectHermesCookies(into: &retried)
@@ -412,6 +437,9 @@ struct NetworkClient {
                 attempt: attempt,
                 didRelogin: true
             )
+        }
+        if redirect {
+            throw Self.hermesRedirectError(http)
         }
 
         guard !(200..<300).contains(http.statusCode) else {
@@ -431,6 +459,24 @@ struct NetworkClient {
             configuration: configuration,
             attempt: attempt + 1,
             didRelogin: didRelogin
+        )
+    }
+
+    // MARK: - Redirects
+
+    /// `true` für die HTTP-Status, die eine Weiterleitung sind.
+    private static func isRedirect(_ statusCode: Int) -> Bool {
+        redirectStatusCodes.contains(statusCode)
+    }
+
+    /// Übersetzt einen Hermes-3xx in einen Fehler mit Ursache.
+    ///
+    /// Ein `Location` auf `cloudflareaccess.com` heißt: das Service-Token fehlt;
+    /// jede andere Weiterleitung heißt: die Hermes-Sitzung fehlt.
+    private static func hermesRedirectError(_ response: HTTPURLResponse) -> APIError {
+        let location = response.value(forHTTPHeaderField: "Location")?.lowercased() ?? ""
+        return .hermesAuthenticationRequired(
+            cloudflareAccess: location.contains("cloudflareaccess.com")
         )
     }
 
@@ -464,7 +510,7 @@ struct NetworkClient {
         // Eine abgelaufene Session-Cookie gehört nicht an den Login.
         loginRequest.setValue(nil, forHTTPHeaderField: "Cookie")
 
-        let session = self.session
+        let session = urlSession(for: .hermes)
         try await HermesLoginCoordinator.shared.login {
             try await Self.performLogin(loginRequest, session: session)
         }
@@ -504,6 +550,11 @@ struct NetworkClient {
 
         guard let http = result.response as? HTTPURLResponse else {
             throw APIError.invalidResponse
+        }
+        // Auch der Login darf nicht in eine HTML-Anmeldeseite laufen; der 3xx
+        // bleibt durch die redirect-blockierende Session sichtbar.
+        if Self.isRedirect(http.statusCode) {
+            throw Self.hermesRedirectError(http)
         }
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401 {
@@ -643,6 +694,11 @@ extension NetworkClient {
     /// danach 200-HTML und verdeckt damit die Ursache (MARAAA-132 §5 B2).
     static let connectionTest = NetworkClient(session: redirectBlockingSession)
 
+    /// Session, die HTTP-Redirects nicht folgt.
+    ///
+    /// Hermes nutzt sie für `send`, `sendRaw`, `stream` und den Login; die
+    /// übrigen Dienste behalten ihre Session. `connectionTest` nutzt sie für
+    /// alle Dienste.
     private static let redirectBlockingSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10

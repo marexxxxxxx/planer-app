@@ -37,6 +37,11 @@ enum APIError: Error, Equatable, Sendable {
     /// Grenze: trägt bewusst keinen Servertext und keine Zugangsdaten — die
     /// Meldung darf niemals Benutzername oder Passwort enthalten.
     case hermesLoginFailed
+    /// Hermes hat den Request mit einem 3xx beantwortet (MARAAA-154).
+    ///
+    /// Grenze: `cloudflareAccess` unterscheidet nur die Ursache; die `Location`
+    /// selbst wird nicht angezeigt.
+    case hermesAuthenticationRequired(cloudflareAccess: Bool)
     case notFound
     case conflict(message: String)
     case rateLimited(retryAfter: TimeInterval?)
@@ -64,7 +69,8 @@ enum APIError: Error, Equatable, Sendable {
         case .server(let status, _, _, _):
             return status
         case .invalidConfiguration, .invalidRequest, .invalidResponse, .cancelled,
-             .timeout, .offline, .emptyResponse, .decoding, .hermesLoginFailed:
+             .timeout, .offline, .emptyResponse, .decoding, .hermesLoginFailed,
+             .hermesAuthenticationRequired:
             return nil
         }
     }
@@ -80,7 +86,7 @@ enum APIError: Error, Equatable, Sendable {
             return retryable
         case .conflict, .invalidConfiguration, .invalidRequest, .invalidResponse, .cancelled,
              .unauthorized, .forbidden, .notFound, .validation, .emptyResponse, .decoding,
-             .hermesLoginFailed:
+             .hermesLoginFailed, .hermesAuthenticationRequired:
             return false
         }
     }
@@ -155,6 +161,11 @@ extension APIError: LocalizedError {
             return "Zugriff verweigert — CF-Access prüfen."
         case .hermesLoginFailed:
             return "Hermes-Anmeldung fehlgeschlagen — Benutzername und Passwort prüfen."
+        case .hermesAuthenticationRequired(let cloudflareAccess):
+            if cloudflareAccess {
+                return "Cloudflare Access: Service-Token fehlt oder ungültig."
+            }
+            return "Hermes-Anmeldung erforderlich — Benutzername/Passwort prüfen."
         case .notFound:
             return "Eintrag nicht gefunden."
         case .conflict(let message):

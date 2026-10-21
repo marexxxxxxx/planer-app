@@ -13,6 +13,9 @@
 #   (7) `send`, `sendRaw` und `stream` nutzen denselben Login-/Cookie-Pfad.
 #   (8) Einstellungen: Hermes zeigt Benutzername/Passwort statt API-Token.
 #   (9) Fehlertexte nennen Benutzername/Passwort und behalten den CF-Hinweis.
+#  (10) Hermes verfolgt keine Redirects; ein 3xx löst genau einen Re-Login aus,
+#       die Wiederholung bleibt POST, und der Fehlertext nennt die Ursache
+#       (MARAAA-154).
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen WP-Abnahmen laufen ebenfalls über grep-/Schema-Prüfungen.
@@ -112,6 +115,7 @@ service_type="Planer/Networking/ServiceType.swift"
 configuration="Planer/Networking/ServiceConfiguration.swift"
 api_error="Planer/Networking/APIError.swift"
 settings="Planer/Settings/ServiceSettingsSection.swift"
+chat_view_model="Planer/Features/Chat/ChatViewModel.swift"
 
 # --- (1) Kein Bearer für Hermes -------------------------------------------
 
@@ -395,6 +399,119 @@ if [[ -n "$hermes_token" ]] \
 else
     fail_check "Hermes-401 nennt nicht mehr API-Token"
 fi
+
+# --- (10) Redirects und 3xx als Auth-Signal -------------------------------
+
+require_fixed "Redirect-Status sind 301/302/303/307/308" \
+    'private static let redirectStatusCodes: Set<Int> = [301, 302, 303, 307, 308]' "$client"
+require_fixed "RedirectBlocker verwirft die Weiterleitung" \
+    'completionHandler(nil)' "$client"
+if grep -qF 'private static let redirectBlockingSession' "$client" \
+    && grep -qF 'delegate: RedirectBlocker()' "$client"; then
+    pass "redirect-blockierende Session nutzt den RedirectBlocker"
+else
+    fail_check "redirect-blockierende Session nutzt den RedirectBlocker"
+fi
+
+# Hermes muss als einziger Dienst die blockierende Session wählen. Die exakte
+# kompakte Form verhindert, dass ein unbedingtes `return session` die Prüfung
+# erfüllt (Mutation: Redirect-Verfolgen wieder aktivieren).
+session_section="$(section_between 'private func urlSession' 'private func loadConfiguration' "$client")"
+session_code="$(strip_comments "$session_section")"
+expected_session='ifservice==.hermes{returnNetworkClient.redirectBlockingSession}returnsession'
+if [[ "$(compact "$session_code")" == *"$expected_session"* ]]; then
+    pass "Hermes nutzt die redirect-blockierende Session, andere Dienste nicht"
+else
+    fail_check "Hermes nutzt die redirect-blockierende Session, andere Dienste nicht"
+fi
+
+session_calls="$(grep -c 'urlSession(for:' "$client" || true)"
+if [[ "$session_calls" -ge 3 ]]; then
+    pass "performRaw, performStream und Login wählen die Session je Dienst"
+else
+    fail_check "performRaw, performStream und Login wählen die Session je Dienst (Aufrufe: $session_calls)"
+fi
+
+# Der 3xx-Zweig muss Teil derselben didRelogin-Bedingung sein wie der 401.
+# Ohne diesen Block blieb das Skript grün, wenn Redirects zwar blockiert, aber
+# nicht als Auth-Signal behandelt werden (Mutation: 3xx-Zweig entfernen).
+if [[ "$(compact "$perform_code")" == *'letredirect=service==.hermes&&Self.isRedirect(http.statusCode)'* ]] \
+    && [[ "$(compact "$perform_code")" == *'if!didRelogin,expired||redirect'* ]]; then
+    pass "performRaw behandelt den Hermes-3xx vor dem didRelogin-Guard"
+else
+    fail_check "performRaw behandelt den Hermes-3xx vor dem didRelogin-Guard"
+fi
+if [[ "$(compact "$stream_code")" == *'letredirect=service==.hermes&&Self.isRedirect(http.statusCode)'* ]] \
+    && [[ "$(compact "$stream_code")" == *'if!didRelogin,expired||redirect'* ]]; then
+    pass "Stream behandelt den Hermes-3xx vor dem didRelogin-Guard"
+else
+    fail_check "Stream behandelt den Hermes-3xx vor dem didRelogin-Guard"
+fi
+
+if [[ "$(compact "$perform_code")" == *'ifredirect{throwSelf.hermesRedirectError(http)}'* ]]; then
+    pass "zweiter 3xx in performRaw wird als Fehler gemeldet"
+else
+    fail_check "zweiter 3xx in performRaw wird als Fehler gemeldet"
+fi
+if [[ "$(compact "$stream_code")" == *'ifredirect{throwSelf.hermesRedirectError(http)}'* ]]; then
+    pass "zweiter 3xx im Stream wird als Fehler gemeldet"
+else
+    fail_check "zweiter 3xx im Stream wird als Fehler gemeldet"
+fi
+
+login_code="$(strip_comments "$(section_between 'private func loginHermes' 'private static func makeLoginBody' "$client")")"
+if grep -qF 'urlSession(for: .hermes)' <<<"$login_code"; then
+    pass "auch der Login verfolgt keine Redirects"
+else
+    fail_check "auch der Login verfolgt keine Redirects"
+fi
+perform_login_code="$(strip_comments "$(section_between 'private static func performLogin' 'guard let url = http.url' "$client")")"
+if grep -qF 'Self.isRedirect(http.statusCode)' <<<"$perform_login_code" \
+    && grep -qF 'Self.hermesRedirectError(http)' <<<"$perform_login_code"; then
+    pass "ein 3xx des Logins wird als Auth-Fehler gemeldet"
+else
+    fail_check "ein 3xx des Logins wird als Auth-Fehler gemeldet"
+fi
+
+# POST bleibt POST: die Wiederholung ist eine Kopie des Requests, nur der
+# Cookie-Header wird ersetzt. Kein GET-Fallback, kein verworfener Body.
+if grep -qF 'var retried = request' <<<"$perform_code" \
+    && ! grep -qE 'retried\.httpMethod|httpMethod[[:space:]]*=[[:space:]]*"GET"' <<<"$perform_code"; then
+    pass "performRaw wiederholt den POST unverändert"
+else
+    fail_check "performRaw wiederholt den POST unverändert"
+fi
+if grep -qF 'var retried = urlRequest' <<<"$stream_code" \
+    && ! grep -qE 'retried\.httpMethod|httpMethod[[:space:]]*=[[:space:]]*"GET"' <<<"$stream_code"; then
+    pass "Stream wiederholt den POST unverändert"
+else
+    fail_check "Stream wiederholt den POST unverändert"
+fi
+forbid "kein GET-Fallback im Client" \
+    'httpMethod[[:space:]]*=[[:space:]]*"GET"' "$client"
+forbid "kein Body-Verlust bei der Wiederholung" \
+    'httpBody[[:space:]]*=[[:space:]]*nil' "$client"
+forbid "kein Verwurf des Content-Type bei der Wiederholung" \
+    'setValue\(nil, forHTTPHeaderField: "Content-Type"\)' "$client"
+
+require_fixed "3xx liest den Location-Header" \
+    'value(forHTTPHeaderField: "Location")' "$client"
+require_fixed "3xx erkennt Cloudflare Access an der Location" \
+    'contains("cloudflareaccess.com")' "$client"
+redirect_error_section="$(section_between 'private static func hermesRedirectError' '// MARK: - Hermes-Anmeldung' "$client")"
+redirect_error_code="$(strip_comments "$redirect_error_section")"
+expected_error='return.hermesAuthenticationRequired(cloudflareAccess:location.contains("cloudflareaccess.com"))'
+if [[ "$(compact "$redirect_error_code")" == *"$expected_error"* ]]; then
+    pass "die Cloudflare-Ursache wird in den Fehler übernommen"
+else
+    fail_check "die Cloudflare-Ursache wird in den Fehler übernommen"
+fi
+require_fixed "Cloudflare-3xx nennt das Service-Token" \
+    'Cloudflare Access: Service-Token fehlt oder ungültig.' "$api_error"
+require_fixed "Hermes-3xx nennt die Anmeldung" \
+    'Hermes-Anmeldung erforderlich — Benutzername/Passwort prüfen.' "$api_error"
+require_fixed "Chat behandelt den Redirect-Fehler als Auth-Fall" \
+    'case .hermesAuthenticationRequired' "$chat_view_model"
 
 if [[ "$fail" -ne 0 ]]; then
     echo "Ergebnis: FEHLGESCHLAGEN"
