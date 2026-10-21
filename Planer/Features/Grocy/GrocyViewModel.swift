@@ -123,7 +123,9 @@ final class GrocyViewModel: ObservableObject {
             catalog = snapshot.catalog
             stock = snapshot.stock.map { GrocyRow(stock: $0) }
             shopping = snapshot.shopping.map { GrocyRow(shopping: $0) }
-            banner = nil
+            banner = snapshot.unitsUnavailable
+                ? "Einheiten konnten nicht geladen werden — Mengen erscheinen ohne Einheit."
+                : nil
         } catch {
             let detail = (error as? APIError)?.localizedDescription ?? error.localizedDescription
             let cached = reloadFromCache()

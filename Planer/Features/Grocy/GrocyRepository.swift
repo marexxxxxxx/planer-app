@@ -15,10 +15,27 @@ enum GrocyCacheKind: String, CaseIterable {
 }
 
 /// Ein vollständiger Lese-Stand aus Grocy.
+///
+/// `unitsUnavailable` meldet, dass `/objects/quantity_units` nicht geladen
+/// werden konnte; Bestand und Einkaufsliste sind dann trotzdem gültig, nur
+/// ohne Einheitennamen.
 struct GrocySnapshot: Equatable {
     let stock: [GrocyStockItem]
     let shopping: [GrocyShoppingItem]
     let catalog: [GrocyProduct]
+    let unitsUnavailable: Bool
+
+    init(
+        stock: [GrocyStockItem],
+        shopping: [GrocyShoppingItem],
+        catalog: [GrocyProduct],
+        unitsUnavailable: Bool = false
+    ) {
+        self.stock = stock
+        self.shopping = shopping
+        self.catalog = catalog
+        self.unitsUnavailable = unitsUnavailable
+    }
 }
 
 /// Ergebnis eines Replay-Laufs der Pending-Queue.
@@ -91,6 +108,7 @@ final class GrocyRepository {
         static let stock = "/stock"
         static let shoppingList = "/objects/shopping_list"
         static let products = "/objects/products"
+        static let quantityUnits = "/objects/quantity_units"
         static let addProduct = "/stock/shoppinglist/add-product"
     }
 
@@ -176,26 +194,34 @@ final class GrocyRepository {
     // MARK: - Netz
 
     /// `GET /api/stock` in der Normalform aus §2.3.
-    func fetchStock() async throws -> [GrocyStockItem] {
+    ///
+    /// Die Einheit steht dort nur als `product.qu_id_stock`; `unitNames` löst
+    /// sie auf (siehe `fetchQuantityUnits()`).
+    func fetchStock(unitNames: [Int: String] = [:]) async throws -> [GrocyStockItem] {
         let entries = try await client.send(
             APIRequest(method: .get, path: Path.stock),
             for: .grocy,
             as: [GrocyStockEntry].self
         )
         let today = now()
-        return entries.compactMap { $0.normalize(today: today, calendar: calendar) }
+        return entries.compactMap {
+            $0.normalize(today: today, calendar: calendar, unitNames: unitNames)
+        }
     }
 
     /// `GET /api/objects/shopping_list`; Produktnamen kommen aus dem Katalog,
-    /// weil die Liste nur `product_id` trägt.
-    func fetchShoppingList(catalog: [GrocyProduct]) async throws -> [GrocyShoppingItem] {
+    /// weil die Liste nur `product_id` trägt. `unitNames` löst `qu_id` auf.
+    func fetchShoppingList(
+        catalog: [GrocyProduct],
+        unitNames: [Int: String] = [:]
+    ) async throws -> [GrocyShoppingItem] {
         let entries = try await client.send(
             APIRequest(method: .get, path: Path.shoppingList),
             for: .grocy,
             as: [GrocyShoppingEntry].self
         )
         let byID = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        return entries.map { $0.normalize(catalog: byID) }
+        return entries.map { $0.normalize(catalog: byID, unitNames: unitNames) }
     }
 
     /// `GET /api/objects/products` — Quelle der Autovervollständigung.
@@ -207,21 +233,53 @@ final class GrocyRepository {
         )
     }
 
-    /// Lädt Bestand, Einkaufsliste und Katalog und ersetzt den Cache (§3.2).
+    /// `GET /api/objects/quantity_units` als Nachschlagetabelle ID → Name.
+    func fetchQuantityUnits() async throws -> [Int: String] {
+        let units = try await client.send(
+            APIRequest(method: .get, path: Path.quantityUnits),
+            for: .grocy,
+            as: [GrocyQuantityUnit].self
+        )
+        return Dictionary(units.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Lädt Bestand, Einkaufsliste, Katalog und Einheiten und ersetzt den
+    /// Cache (§3.2).
     ///
     /// Grocy ist autoritativ: der Cache wird vollständig ersetzt, nicht gemischt.
+    /// Ein Fehler beim Einheitenabruf ist nicht fatal: der Tab bleibt benutzbar,
+    /// die Einheit bleibt leer und `unitsUnavailable` meldet den Ausfall.
     @discardableResult
     func refresh() async throws -> GrocySnapshot {
-        async let stockTask = fetchStock()
         async let catalogTask = fetchCatalog()
-        let (stock, catalog) = try await (stockTask, catalogTask)
-        let shopping = try await fetchShoppingList(catalog: catalog)
+        async let unitsTask = loadQuantityUnits()
+        let (catalog, units) = try await (catalogTask, unitsTask)
+        async let stockTask = fetchStock(unitNames: units.names)
+        async let shoppingTask = fetchShoppingList(catalog: catalog, unitNames: units.names)
+        let (stock, shopping) = try await (stockTask, shoppingTask)
 
         let fetchedAt = now()
         try upsertStock(stock, fetchedAt: fetchedAt)
         try upsertShopping(shopping, fetchedAt: fetchedAt)
         try context.save()
-        return GrocySnapshot(stock: stock, shopping: shopping, catalog: catalog)
+        return GrocySnapshot(
+            stock: stock,
+            shopping: shopping,
+            catalog: catalog,
+            unitsUnavailable: units.unavailable
+        )
+    }
+
+    /// Einheitenabruf, der den Tab bei einem Fehler nicht mitzieht.
+    ///
+    /// Der Fehler wird nicht verschluckt: `unavailable` geht in den Snapshot
+    /// und von dort in das Banner der Ansicht.
+    private func loadQuantityUnits() async -> (names: [Int: String], unavailable: Bool) {
+        do {
+            return (try await fetchQuantityUnits(), false)
+        } catch {
+            return ([:], true)
+        }
     }
 
     // MARK: - Schreiben

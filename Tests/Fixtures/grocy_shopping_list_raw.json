@@ -1,0 +1,26 @@
+[
+  {
+    "id": 11,
+    "product_id": 1,
+    "amount": 1,
+    "note": null,
+    "done": 0,
+    "qu_id": 1
+  },
+  {
+    "id": 12,
+    "product_id": 3,
+    "amount": 2,
+    "note": null,
+    "done": 1,
+    "qu_id": 3
+  },
+  {
+    "id": 13,
+    "product_id": null,
+    "amount": 1,
+    "note": "Brot",
+    "done": 0,
+    "qu_id": 4
+  }
+]

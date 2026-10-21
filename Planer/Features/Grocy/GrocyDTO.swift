@@ -72,6 +72,22 @@ enum GrocyDay {
 struct GrocyProduct: Decodable, Identifiable, Equatable, Sendable {
     let id: Int
     let name: String
+    /// Bestands-Einheit als ID; der Name steht nur in
+    /// `GET /objects/quantity_units` (`{id,name}`).
+    let quantityUnitStockID: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case quantityUnitStockID = "qu_id_stock"
+    }
+}
+
+/// Zeile aus `GET /objects/quantity_units`. Die App braucht nur die
+/// Nachschlagetabelle ID → Name.
+struct GrocyQuantityUnit: Decodable, Equatable, Sendable {
+    let id: Int
+    let name: String
 }
 
 /// Rohe Bestandszeile aus `GET /stock` (grocy.openapi.json
@@ -102,14 +118,18 @@ struct GrocyStockEntry: Decodable, Equatable {
 
     /// Normalform aus §2.3; `nil`, wenn die Zeile keine Produkt-ID trägt
     /// (das Backend verwirft solche Zeilen ebenfalls).
-    func normalize(today: Date, calendar: Calendar) -> GrocyStockItem? {
+    func normalize(
+        today: Date,
+        calendar: Calendar,
+        unitNames: [Int: String] = [:]
+    ) -> GrocyStockItem? {
         guard let productID = productID ?? fallbackID else { return nil }
         let bestBeforeDate = GrocyDay.parse(bestBeforeDate)
         return GrocyStockItem(
             productID: productID,
             name: product?.name ?? "",
             amount: amount ?? 0,
-            unit: resolvedUnitName,
+            unit: resolvedUnitName(unitNames: unitNames),
             bestBeforeDate: bestBeforeDate,
             isExpired: Self.isExpired(bestBeforeDate, today: today, calendar: calendar)
         )
@@ -122,9 +142,16 @@ struct GrocyStockEntry: Decodable, Equatable {
         return calendar.startOfDay(for: bestBeforeDate) < calendar.startOfDay(for: today)
     }
 
-    private var resolvedUnitName: String {
+    /// `/api/stock` liefert keinen Einheitennamen, nur `product.qu_id_stock`.
+    /// Ein mitgelieferter Name hat Vorrang (Snapshot-Kompatibilität); fehlt er,
+    /// löst die Namensmap die ID auf. Unbekannte ID → leerer String.
+    private func resolvedUnitName(unitNames: [Int: String]) -> String {
         let candidates = [stockUnitName, quantityUnitName, quantityUnit, unit]
-        return candidates.compactMap { $0?.name }.first { !$0.isEmpty } ?? ""
+        if let name = candidates.compactMap({ $0?.name }).first(where: { !$0.isEmpty }) {
+            return name
+        }
+        guard let id = product?.quantityUnitStockID else { return "" }
+        return unitNames[id] ?? ""
     }
 }
 
@@ -154,6 +181,7 @@ struct GrocyShoppingEntry: Decodable, Equatable {
     private let done: GrocyFlagValue?
     private let product: GrocyProduct?
     private let quantityUnitName: GrocyUnitValue?
+    private let quantityUnitID: Int?
     private let unit: GrocyUnitValue?
 
     enum CodingKeys: String, CodingKey {
@@ -164,12 +192,17 @@ struct GrocyShoppingEntry: Decodable, Equatable {
         case done
         case product
         case quantityUnitName = "qu_name"
+        case quantityUnitID = "qu_id"
         case unit
     }
 
     /// Normalform aus §3.2 mit Produktnamen aus dem Katalog, weil
-    /// `/objects/shopping_list` nur `product_id` liefert.
-    func normalize(catalog: [Int: GrocyProduct]) -> GrocyShoppingItem {
+    /// `/objects/shopping_list` nur `product_id` liefert. Die Einheit kommt
+    /// aus `qu_id` über die Namensmap; ein mitgelieferter Name hat Vorrang.
+    func normalize(
+        catalog: [Int: GrocyProduct],
+        unitNames: [Int: String] = [:]
+    ) -> GrocyShoppingItem {
         let note = self.note?.trimmingCharacters(in: .whitespacesAndNewlines)
         let catalogName = productID.flatMap { catalog[$0]?.name }
         let fallbackName = productID.map { "Produkt \($0)" } ?? "Einkaufsposten"
@@ -177,9 +210,12 @@ struct GrocyShoppingEntry: Decodable, Equatable {
             ?? catalogName
             ?? (note?.isEmpty == false ? note : nil)
             ?? fallbackName
-        let unitName = [quantityUnitName, unit]
+        let explicitUnitName = [quantityUnitName, unit]
             .compactMap { $0?.name }
-            .first { !$0.isEmpty } ?? ""
+            .first { !$0.isEmpty }
+        let unitName = explicitUnitName
+            ?? quantityUnitID.flatMap { unitNames[$0] }
+            ?? ""
         return GrocyShoppingItem(
             itemID: id,
             productID: productID,

@@ -134,6 +134,7 @@ private struct GrocyContentView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .top, spacing: 0) {
             areaPicker
         }
