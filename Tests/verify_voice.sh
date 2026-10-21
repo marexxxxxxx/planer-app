@@ -319,25 +319,35 @@ fi
 # --- V3/V5: Herkunft der Antwort ist markiert (§7) ------------------------
 #
 # Nach CH1/CH2 heißt der Marker `Entry.engine` (ViewModel-Feld), das Ereignis
-# `case engine` (Provider) und die Anzeige `entry.engine` (View). Geprüft wird
-# weiterhin die ganze Kette — ein fehlendes Glied bleibt rot.
+# `case engine` (Provider) und die Anzeige `entry.engine` (View). Die ganze
+# Kette wird in drei einzelnen Gliedern geprüft — jedes fehlende Glied ist ein
+# Fehlschlag, kein Skip.
+#
+# G-CH4 (MARAAA-130): Früher stand das Provider-Glied als Wächter um den
+# gesamten Block; fehlte `case engine(`, meldete der Test `skip` und endete
+# mit Exit 0. Damit war genau die Entfernung des geprüften Verhaltens grün.
+# Deshalb hat jedes Glied jetzt seinen eigenen Pass-/Fail-Zweig (MARAAA-131).
 
-if grep -qE 'case engine\(' Planer/Features/Chat/ChatStreamProvider.swift 2>/dev/null; then
-    engine_model=0
-    engine_view=0
-    if grep -qE 'var engine: ChatEngine\?' Planer/Features/Chat/ChatViewModel.swift; then
-        engine_model=1
-    fi
-    if grep -qE 'entry\.engine' Planer/Features/Chat/ChatView.swift; then
-        engine_view=1
-    fi
-    if [[ "$engine_model" -eq 1 && "$engine_view" -eq 1 ]]; then
-        pass "§13: die Herkunft der Antwort ist am Chat-Eintrag markiert"
-    else
-        fail_check "§13: die Herkunft der Antwort ist am Chat-Eintrag markiert (Modell: $engine_model, View: $engine_view)"
-    fi
+engine_provider_file="Planer/Features/Chat/ChatStreamProvider.swift"
+engine_model_file="Planer/Features/Chat/ChatViewModel.swift"
+engine_view_file="Planer/Features/Chat/ChatView.swift"
+
+if grep -qE 'case engine\(' "$engine_provider_file" 2>/dev/null; then
+    pass "§13: Provider kennt den engine-Fall ($engine_provider_file)"
 else
-    skip "V3/V5: ChatStreamProvider kennt noch keinen engine-Fall"
+    fail_check "§13: Provider kennt den engine-Fall ($engine_provider_file)"
+fi
+
+if grep -qE 'var engine: ChatEngine\?' "$engine_model_file" 2>/dev/null; then
+    pass "§13: Modell markiert die Herkunft am Eintrag ($engine_model_file)"
+else
+    fail_check "§13: Modell markiert die Herkunft am Eintrag ($engine_model_file)"
+fi
+
+if grep -qE 'entry\.engine' "$engine_view_file" 2>/dev/null; then
+    pass "§13: View zeigt die Herkunft der Antwort an ($engine_view_file)"
+else
+    fail_check "§13: View zeigt die Herkunft der Antwort an ($engine_view_file)"
 fi
 
 if [[ "$fail" -ne 0 ]]; then
