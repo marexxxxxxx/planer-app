@@ -1,0 +1,30 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "01J9Z6K4M2Q7R8S3T5V0W1X2Y3",
+      "title": "Wochenplan und Einkauf",
+      "preview": "Plane die Woche und setze Mehl auf die Einkaufsliste.",
+      "message_count": 7,
+      "tool_call_count": 3,
+      "last_active": 1761049024.512,
+      "pinned": false,
+      "archived": false,
+      "source": "desktop"
+    },
+    {
+      "id": "01J9Z6K4M2Q7R8S3T5V0W1X2Y4",
+      "title": "To-Do für Samstag",
+      "preview": "Erinnere mich am Freitag an den Wochenplan.",
+      "message_count": 2,
+      "tool_call_count": 0,
+      "last_active": 1760962740.0,
+      "pinned": true,
+      "archived": false,
+      "source": "desktop"
+    }
+  ],
+  "limit": 2,
+  "offset": 0,
+  "has_more": true
+}

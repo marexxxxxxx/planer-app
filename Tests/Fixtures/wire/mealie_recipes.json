@@ -1,0 +1,72 @@
+{
+  "page": 1,
+  "per_page": 50,
+  "total": 2,
+  "total_pages": 1,
+  "items": [
+    {
+      "id": "0f4b9d3e-1c2a-4f6b-8d7e-9a1c2b3d4e5f",
+      "userId": "7f3e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b",
+      "householdId": "c4d6e8f0-1a2b-4c3d-9e5f-7a8b9c0d1e2f",
+      "groupId": "b2a4c6d8-0e1f-4a3b-8c5d-6e7f8a9b0c1d",
+      "name": "Linsensuppe",
+      "slug": "linsensuppe",
+      "image": "4LEY",
+      "description": "Deftige Linsensuppe mit Wurzelgemüse.",
+      "recipeCategory": [
+        {
+          "id": "6f2d8a1c-3b4e-4d5f-9a0b-1c2d3e4f5a6b",
+          "name": "Suppe",
+          "slug": "suppe"
+        }
+      ],
+      "tags": [],
+      "tools": [],
+      "rating": null,
+      "orgURL": null,
+      "dateAdded": "2026-09-14",
+      "dateUpdated": "2026-10-02T18:11:34.512345",
+      "recipeYield": "4 Portionen",
+      "totalTime": "45 Minuten",
+      "prepTime": "15 Minuten",
+      "cookTime": "30 Minuten",
+      "recipeServings": 4,
+      "recipeIngredient": [],
+      "recipeInstructions": [],
+      "lastMade": null
+    },
+    {
+      "id": "a1e5c8d4-6f2b-4c93-8d07-3e9b6a2f1c54",
+      "userId": "7f3e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b",
+      "householdId": "c4d6e8f0-1a2b-4c3d-9e5f-7a8b9c0d1e2f",
+      "groupId": "b2a4c6d8-0e1f-4a3b-8c5d-6e7f8a9b0c1d",
+      "name": "Apfelkuchen",
+      "slug": "apfelkuchen",
+      "image": "9KQ2",
+      "description": "Saftiger Rührteig mit Äpfeln.",
+      "recipeCategory": [
+        {
+          "id": "8a3e5c7d-1f2b-4d6e-9c0a-3b4d5e6f7a8b",
+          "name": "Backen",
+          "slug": "backen"
+        }
+      ],
+      "tags": [],
+      "tools": [],
+      "rating": null,
+      "orgURL": null,
+      "dateAdded": "2026-08-30",
+      "dateUpdated": "2026-09-21T07:42:08.120000",
+      "recipeYield": "1 Springform",
+      "totalTime": "90 Minuten",
+      "prepTime": "25 Minuten",
+      "cookTime": "65 Minuten",
+      "recipeServings": 8,
+      "recipeIngredient": [],
+      "recipeInstructions": [],
+      "lastMade": null
+    }
+  ],
+  "next": null,
+  "previous": null
+}

@@ -1,0 +1,43 @@
+[
+  {
+    "id": 11,
+    "product_id": 1,
+    "note": null,
+    "amount": 1,
+    "row_created_timestamp": "2026-10-21 07:52:25",
+    "shopping_list_id": 1,
+    "done": 0,
+    "qu_id": 1,
+    "qu_name": "Packung"
+  },
+  {
+    "id": 12,
+    "product_id": 3,
+    "note": null,
+    "amount": 2,
+    "row_created_timestamp": "2026-10-21 07:52:26",
+    "shopping_list_id": 1,
+    "done": 1,
+    "qu_id": 3
+  },
+  {
+    "id": 13,
+    "product_id": 2,
+    "note": null,
+    "amount": 1.5,
+    "row_created_timestamp": "2026-10-21 07:52:27",
+    "shopping_list_id": 1,
+    "done": 0,
+    "qu_id": 2
+  },
+  {
+    "id": 14,
+    "product_id": null,
+    "note": "Brot",
+    "amount": 1,
+    "row_created_timestamp": "2026-10-21 07:52:28",
+    "shopping_list_id": 1,
+    "done": 0,
+    "qu_id": null
+  }
+]

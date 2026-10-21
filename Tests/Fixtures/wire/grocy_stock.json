@@ -1,0 +1,98 @@
+[
+  {
+    "amount": 2,
+    "amount_aggregated": 2,
+    "value": 2.58,
+    "best_before_date": "2026-10-24",
+    "amount_opened": 0,
+    "amount_opened_aggregated": 0,
+    "is_aggregated_amount": 0,
+    "due_type": 1,
+    "product_id": 1,
+    "product": {
+      "id": 1,
+      "name": "Vollmilch",
+      "description": null,
+      "product_group_id": 2,
+      "active": 1,
+      "location_id": 1,
+      "qu_id_purchase": 1,
+      "qu_id_stock": 1,
+      "min_stock_amount": 1,
+      "default_best_before_days": 7,
+      "picture_file_name": null
+    }
+  },
+  {
+    "amount": 1.5,
+    "amount_aggregated": 1.5,
+    "value": 3.15,
+    "best_before_date": null,
+    "amount_opened": 0,
+    "amount_opened_aggregated": 0,
+    "is_aggregated_amount": 0,
+    "due_type": 2,
+    "product_id": 2,
+    "product": {
+      "id": 2,
+      "name": "Bananen",
+      "description": null,
+      "product_group_id": 4,
+      "active": 1,
+      "location_id": 1,
+      "qu_id_purchase": 2,
+      "qu_id_stock": 2,
+      "min_stock_amount": 0,
+      "default_best_before_days": 5,
+      "picture_file_name": null
+    }
+  },
+  {
+    "amount": 0,
+    "amount_aggregated": 0,
+    "value": 0,
+    "best_before_date": "2026-10-01",
+    "amount_opened": 0,
+    "amount_opened_aggregated": 0,
+    "is_aggregated_amount": 0,
+    "due_type": 1,
+    "product_id": 3,
+    "product": {
+      "id": 3,
+      "name": "Joghurt",
+      "description": "Naturjoghurt 3,5 %",
+      "product_group_id": 2,
+      "active": 1,
+      "location_id": 1,
+      "qu_id_purchase": 3,
+      "qu_id_stock": 3,
+      "min_stock_amount": 2,
+      "default_best_before_days": 14,
+      "picture_file_name": null
+    }
+  },
+  {
+    "amount": 0.75,
+    "amount_aggregated": 0.75,
+    "value": 0.89,
+    "best_before_date": "2027-03-31",
+    "amount_opened": 0,
+    "amount_opened_aggregated": 0,
+    "is_aggregated_amount": 0,
+    "due_type": 1,
+    "product_id": 4,
+    "product": {
+      "id": 4,
+      "name": "Mehl",
+      "description": "Weizenmehl Type 405",
+      "product_group_id": 3,
+      "active": 1,
+      "location_id": 2,
+      "qu_id_purchase": 2,
+      "qu_id_stock": 2,
+      "min_stock_amount": 1,
+      "default_best_before_days": 180,
+      "picture_file_name": null
+    }
+  }
+]

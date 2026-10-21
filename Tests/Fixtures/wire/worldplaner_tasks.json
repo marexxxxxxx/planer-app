@@ -1,0 +1,46 @@
+[
+  {
+    "id": "4f1d8c2a-6b7e-4c31-9a0f-2d5e8b1c7a10",
+    "title": "Wochenplan für Samstag abstimmen",
+    "description": "Mit dem Haushalt klären, ob Samstag oder Sonntag gekocht wird.",
+    "status": "open",
+    "priority": "high",
+    "source": "local",
+    "due_at": "2026-10-22",
+    "completed_at": null,
+    "version": 1
+  },
+  {
+    "id": "b83a5e14-0c6d-4f92-8e37-5a1c9d2b6f44",
+    "title": "Einkaufsliste prüfen",
+    "description": null,
+    "status": "open",
+    "priority": "normal",
+    "source": "hermes",
+    "due_at": null,
+    "completed_at": null,
+    "version": 3
+  },
+  {
+    "id": "c6e2f903-8a1b-4d6c-9f05-7b3e4a1d2c58",
+    "title": "Fahrradlicht wechseln",
+    "description": null,
+    "status": "done",
+    "priority": "low",
+    "source": "local",
+    "due_at": "2026-10-18",
+    "completed_at": "2026-10-18T16:20:00Z",
+    "version": 2
+  },
+  {
+    "id": "a1b7d4e6-2c9f-4e03-b58a-6d0c3f19e842",
+    "title": "Rezept für Linsensuppe raussuchen",
+    "description": "Aus der Mealie-Bibliothek, ohne Zutaten mit Nüssen.",
+    "status": "done",
+    "priority": "normal",
+    "source": "hermes",
+    "due_at": null,
+    "completed_at": "2026-10-19T07:45:00Z",
+    "version": 4
+  }
+]

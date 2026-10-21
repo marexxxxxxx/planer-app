@@ -1,0 +1,57 @@
+{
+  "object": "list",
+  "session_id": "01J9Z6K4M2Q7R8S3T5V0W1X2Y3",
+  "data": [
+    {
+      "id": 41,
+      "role": "user",
+      "content": "Plane die Woche und setze Mehl auf die Einkaufsliste.",
+      "reasoning": null,
+      "reasoning_content": null,
+      "tool_calls": null,
+      "tool_name": null,
+      "tool_call_id": null,
+      "display_kind": null,
+      "timestamp": 1761048900.125
+    },
+    {
+      "id": 42,
+      "role": "assistant",
+      "content": null,
+      "reasoning": null,
+      "reasoning_content": "Ich prüfe zuerst den Wochenplan und danach den Vorrat.",
+      "tool_calls": [
+        {
+          "id": "call_01J9Z7A1",
+          "type": "function",
+          "function": {
+            "name": "mealie_week",
+            "arguments": "{\"week_offset\":0}"
+          }
+        }
+      ],
+      "tool_name": null,
+      "tool_call_id": null,
+      "display_kind": "tool",
+      "timestamp": 1761048902.640
+    },
+    {
+      "id": 43,
+      "role": "tool",
+      "content": "{\"ok\":true,\"entries\":4}",
+      "reasoning": null,
+      "reasoning_content": null,
+      "tool_calls": null,
+      "tool_name": "mealie_week",
+      "tool_call_id": "call_01J9Z7A1",
+      "display_kind": "tool",
+      "timestamp": 1761048903.001
+    }
+  ],
+  "pagination": {
+    "limit": 20,
+    "offset": 0,
+    "order": "oldest",
+    "returned": 3
+  }
+}

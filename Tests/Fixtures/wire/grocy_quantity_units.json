@@ -1,0 +1,38 @@
+[
+  {
+    "id": 1,
+    "name": "Packung",
+    "description": null,
+    "row_created_timestamp": "2026-10-21 00:50:04",
+    "name_plural": "Packungen",
+    "plural_forms": null,
+    "active": 1
+  },
+  {
+    "id": 2,
+    "name": "kg",
+    "description": null,
+    "row_created_timestamp": "2026-10-21 00:50:04",
+    "name_plural": "kg",
+    "plural_forms": null,
+    "active": 1
+  },
+  {
+    "id": 3,
+    "name": "Becher",
+    "description": null,
+    "row_created_timestamp": "2026-10-21 00:50:06",
+    "name_plural": "Becher",
+    "plural_forms": null,
+    "active": 1
+  },
+  {
+    "id": 4,
+    "name": "Stück",
+    "description": null,
+    "row_created_timestamp": "2026-10-21 00:50:06",
+    "name_plural": "Stück",
+    "plural_forms": null,
+    "active": 1
+  }
+]
