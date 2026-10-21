@@ -81,6 +81,7 @@ struct TodoEditorSheet: View {
                     }
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Neues To-Do")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

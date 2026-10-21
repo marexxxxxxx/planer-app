@@ -50,7 +50,7 @@ struct TodoRepository {
         limit: Int = TodoAPI.defaultLimit
     ) async throws -> [TodoDTO] {
         let effectiveLimit = Self.clamped(limit)
-        let tasks = try await requestTasks(status: status, limit: effectiveLimit)
+        let tasks = try await requestTasks(status: status.serverStatus, limit: effectiveLimit)
 
         // Nur ein vollständiger, ungekürzter Abruf sagt etwas über fehlende
         // Einträge aus. Ein gefilterter Abruf darf nur Einträge genau dieses
@@ -87,12 +87,50 @@ struct TodoRepository {
         return visible.map(TodoDTO.init(item:))
     }
 
-    /// Holt einen einzelnen Serverstand. Es gibt kein `GET /tasks/{id}`;
-    /// deshalb läuft der Abruf über die All-Liste mit Server-Maximum.
-    func serverTask(id: String) async throws -> TodoDTO? {
-        let tasks = try await requestTasks(status: .all, limit: TodoAPI.maximumLimit)
-        try merge(tasks, prune: .none)
-        return tasks.first { $0.id == id }
+    /// Ergebnis von `serverTask(id:)`.
+    ///
+    /// Es gibt kein `GET /tasks/{id}`; der Einzelabruf läuft über die
+    /// All-Liste. Das Backend liefert höchstens `limit` Zeilen (Maximum 200) und
+    /// sortiert `created_at DESC` (spec-ios §2.2) — ein fehlender Treffer im
+    /// Fenster ist deshalb **kein** Beweis für eine Löschung. Drei Fälle statt
+    /// `nil`, damit „nicht gesehen“ nicht als „nicht vorhanden“ gilt.
+    enum ServerTaskLookup {
+        /// Der Server kennt den Eintrag; sein Stand ist belegt.
+        case found(TodoDTO)
+        /// Alle Status-Partitionen waren vollständig gelesen und der Eintrag
+        /// war in keiner: er ist sicher nicht vorhanden.
+        case absent
+        /// Mindestens eine Partition war gekappt (`limit` erreicht). Ob der
+        /// Eintrag existiert, ist offen.
+        case unknown
+    }
+
+    /// Holt einen einzelnen Serverstand.
+    ///
+    /// Es gibt kein `GET /tasks/{id}`; deshalb wird die All-Liste nach Status
+    /// partitioniert gelesen — das Backend kennt nur `status` und `limit`, kein
+    /// `offset`. Eine Partition gilt nur dann als vollständig gelesen, wenn sie
+    /// weniger als `TodoAPI.maximumLimit` Zeilen liefert; nur dann ist ein
+    /// fehlender Treffer ein Beweis für Abwesenheit.
+    func serverTask(id: String) async throws -> ServerTaskLookup {
+        var isComplete = true
+        var match: TodoDTO?
+
+        for status in [TodoStatus.open.rawValue, TodoStatus.done.rawValue] {
+            let page = try await requestTasks(status: status, limit: TodoAPI.maximumLimit)
+            if page.count >= TodoAPI.maximumLimit {
+                isComplete = false
+            }
+            try merge(page, prune: .none)
+            if match == nil, let hit = page.first(where: { $0.id == id }) {
+                match = hit
+            }
+        }
+
+        if let match {
+            return .found(match)
+        }
+        return isComplete ? .absent : .unknown
     }
 
     // MARK: - Schreiben
@@ -226,16 +264,24 @@ struct TodoRepository {
     // MARK: - Konflikte
 
     /// „Server behalten“: verwirft die lokale Absicht und übernimmt den
-    /// Serverstand. Ist der Eintrag serverseitig weg, verschwindet er lokal.
+    /// Serverstand. Nur ein belegtes Fehlen (`.absent`) entfernt den Eintrag
+    /// lokal; ein gekappter Abruf (`.unknown`) lässt ihn stehen und meldet den
+    /// Konflikt erneut, statt ihn still zu beseitigen.
     func discardLocalChanges(id: String) async throws {
         guard let item = try item(id: id) else { return }
-        if let server = try await serverTask(id: id) {
+        switch try await serverTask(id: id) {
+        case .found(let server):
             Self.apply(server, to: item)
             item.isDirty = false
             item.pendingDelete = false
             try context.save()
-        } else {
+        case .absent:
             try removeLocal(id: id)
+        case .unknown:
+            throw APIError.conflict(
+                message: "Der Serverstand ist nicht vollständig lesbar (mehr als "
+                    + "\(TodoAPI.maximumLimit) Einträge). Der lokale Eintrag bleibt erhalten."
+            )
         }
     }
 
@@ -245,7 +291,19 @@ struct TodoRepository {
         guard let item = try item(id: id) else {
             throw APIError.notFound
         }
-        let server = try await serverTask(id: id)
+        let lookup = try await serverTask(id: id)
+        let baseVersion: Int
+        switch lookup {
+        case .found(let server):
+            baseVersion = server.version
+        case .absent:
+            // Der Server kennt den Eintrag nicht mehr; ein PATCH liefe ins Leere.
+            throw APIError.notFound
+        case .unknown:
+            // Die aktuelle Server-Version ist nicht belegbar; die lokale Version
+            // bleibt Basis (wie vor der Aufteilung des Einzelabrufs).
+            baseVersion = item.version
+        }
         return try await update(
             id: id,
             title: item.title,
@@ -253,7 +311,7 @@ struct TodoRepository {
             status: item.status,
             priority: item.priority,
             dueAt: item.dueAt,
-            baseVersion: server?.version ?? item.version
+            baseVersion: baseVersion
         )
     }
 
@@ -351,11 +409,11 @@ struct TodoRepository {
     // MARK: - HTTP
 
     private func requestTasks(
-        status: TodoStatusFilter,
+        status: String,
         limit: Int
     ) async throws -> [TodoDTO] {
         let query = [
-            URLQueryItem(name: "status", value: status.serverStatus),
+            URLQueryItem(name: "status", value: status),
             URLQueryItem(name: "limit", value: String(limit))
         ]
         return try await network.send(

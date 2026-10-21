@@ -264,17 +264,9 @@ final class TodosViewModel: ObservableObject {
             banner = "Der Eintrag existiert nicht mehr — aus der Liste entfernt."
             updatePendingCount()
         case .validation:
-            // Die lokale Änderung war ungültig: Serverstand wiederherstellen.
-            if let repository {
-                do {
-                    try await repository.discardLocalChanges(id: task.id)
-                    await reloadFromCache()
-                    updatePendingCount()
-                } catch let restoreError {
-                    banner = message(for: restoreError)
-                    return
-                }
-            }
+            // Die lokale Änderung ist ungültig. Sie wird **nicht** automatisch
+            // verworfen: Verwerfen ist allein die Entscheidung des Nutzers
+            // („Server behalten“ im Konfliktdialog, spec-ios §3.1).
             banner = message(for: error)
         default:
             if TodoRepository.isConnectivityFailure(error) {
@@ -292,20 +284,26 @@ final class TodosViewModel: ObservableObject {
     private func presentConflict(id: String) async {
         guard let repository else { return }
         do {
-            guard let server = try await repository.serverTask(id: id) else {
+            switch try await repository.serverTask(id: id) {
+            case .found(let server):
+                let cachedLocal: TodoDTO? = (try? repository.cached(status: .all, limit: limit))?
+                    .first(where: { $0.id == id })
+                guard let local = cachedLocal ?? tasks.first(where: { $0.id == id }) else {
+                    banner = "Konflikt erkannt, aber der lokale Stand ist nicht lesbar."
+                    return
+                }
+                conflict = TodoConflict(id: id, local: local, server: server)
+                banner = nil
+            case .absent:
                 tasks.removeAll { $0.id == id }
                 banner = "Der Eintrag existiert nicht mehr — der Konflikt hat sich erledigt."
                 updatePendingCount()
-                return
+            case .unknown:
+                // Der Einzelabruf war gekappt: die Abwesenheit ist nicht belegt,
+                // der Eintrag bleibt stehen und der Konflikt wird gemeldet.
+                banner = "Konflikt erkannt, aber der Serverstand ist nicht vollständig "
+                    + "lesbar. Der Eintrag bleibt erhalten."
             }
-            let cachedLocal: TodoDTO? = (try? repository.cached(status: .all, limit: limit))?
-                .first(where: { $0.id == id })
-            guard let local = cachedLocal ?? tasks.first(where: { $0.id == id }) else {
-                banner = "Konflikt erkannt, aber der lokale Stand ist nicht lesbar."
-                return
-            }
-            conflict = TodoConflict(id: id, local: local, server: server)
-            banner = nil
         } catch {
             banner = message(for: error)
         }

@@ -209,6 +209,7 @@ struct TodosView: View {
             }
         }
         .listStyle(.plain)
+        .scrollDismissesKeyboard(.interactively)
         .scrollContentBackground(.hidden)
         .refreshable { @MainActor in
             await viewModel.refresh()
