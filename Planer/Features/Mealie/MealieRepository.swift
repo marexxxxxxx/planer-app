@@ -38,14 +38,16 @@ final class MealieRepository {
     private let now: () -> Date
     private let calendar: Calendar
 
-    /// Origin der Mealie-Instanz für relative Bildpfade; wird **bei jedem
-    /// Zugriff** aus der Keychain aufgelöst (MARAAA-140/M1).
+    /// Origin der Mealie-Instanz für relative Bildpfade; wird **einmal pro
+    /// Ladevorgang** aus der Keychain aufgelöst (MARAAA-144).
     ///
     /// Bewusst nicht im Init gelesen: wer eine Basis-URL erst nach dem Öffnen
     /// des Rezepte-Tabs hinterlegt oder korrigiert, sähe sonst bis zum
-    /// App-Neustart nur Platzhalter. `nil`, solange keine gültige Basis in der
+    /// App-Neustart nur Platzhalter (MARAAA-140/M1). Der Aufrufer reicht den
+    /// Wert an die Zeilenbildung weiter, damit nicht jede Zeile erneut vier
+    /// Keychain-Items liest. `nil`, solange keine gültige Basis in der
     /// Keychain liegt (dann bleibt das Bild aus).
-    private var imageBaseURL: URL? {
+    func resolveImageBaseURL() -> URL? {
         (try? ServiceConfiguration.load(.mealie, keychain: keychain))?.baseURL
     }
 
@@ -172,8 +174,10 @@ final class MealieRepository {
     /// `nil`, wenn weder `id` noch `slug` vorhanden ist (nicht adressierbar).
     ///
     /// Die Bild-URL entsteht aus der Rezept-ID, nicht aus `summary.image`:
-    /// Mealie liefert dort nur ein Cache-Token (Demo: `"4LEY"`).
-    func row(from summary: MealieRecipeSummary) -> MealieRecipeRow? {
+    /// Mealie liefert dort nur ein Cache-Token (Demo: `"4LEY"`). `imageBaseURL`
+    /// wird vom Ladevorgang hereingereicht, damit die Keychain nicht pro Zeile
+    /// gelesen wird (MARAAA-144).
+    func row(from summary: MealieRecipeSummary, imageBaseURL: URL?) -> MealieRecipeRow? {
         let recipeID = MealieText.nonEmpty(summary.id)
         let identifier = recipeID ?? MealieText.nonEmpty(summary.slug)
         guard let identifier else { return nil }
@@ -182,7 +186,7 @@ final class MealieRepository {
             name: MealieText.nonEmpty(summary.name) ?? MealieText.nonEmpty(summary.slug) ?? identifier,
             slug: MealieText.nonEmpty(summary.slug),
             imageID: recipeID,
-            imageURL: recipeID.flatMap { imageURL(forRecipeID: $0) },
+            imageURL: recipeID.flatMap { Self.imageURL(forRecipeID: $0, baseURL: imageBaseURL) },
             totalTime: MealieText.nonEmpty(summary.totalTime),
             servings: summary.recipeServings ?? 0
         )
@@ -196,13 +200,14 @@ final class MealieRepository {
 
     /// Bild-URL eines Rezepts: `{basis}/media/recipes/{id}/images/original.webp`.
     ///
-    /// `basis` ist die API-Basis-URL (`…/api`, §2.4). Die Rezept-ID wird als
-    /// einzelnes Pfad-Segment kodiert, damit ein Serverwert keine zusätzlichen
-    /// Segmente einschleusen kann. `nil` bei fehlender ID, fehlender Basis-URL
-    /// oder nicht erlaubtem Scheme — ein fehlendes Bild ist kein Fehlerzustand
-    /// des Tabs.
-    func imageURL(forRecipeID recipeID: String) -> URL? {
-        guard let base = imageBaseURL,
+    /// `baseURL` ist die API-Basis-URL (`…/api`, §2.4), die der Ladevorgang
+    /// einmal auflöst und an alle Zeilen weitergibt (MARAAA-144). Die
+    /// Rezept-ID wird als einzelnes Pfad-Segment kodiert, damit ein Serverwert
+    /// keine zusätzlichen Segmente einschleusen kann. `nil` bei fehlender ID,
+    /// fehlender Basis-URL oder nicht erlaubtem Scheme — ein fehlendes Bild
+    /// ist kein Fehlerzustand des Tabs.
+    static func imageURL(forRecipeID recipeID: String, baseURL: URL?) -> URL? {
+        guard let base = baseURL,
               let scheme = base.scheme?.lowercased(),
               Self.allowedImageSchemes.contains(scheme),
               let host = base.host,
@@ -318,7 +323,11 @@ final class MealieRepository {
 
     /// Bibliotheks-Zeilen aus dem Cache; Plan-Zeilen tragen das Präfix
     /// `plan:` und bleiben außen vor.
+    ///
+    /// Die Bildbasis wird **einmal vor** der Zeilenbildung aufgelöst
+    /// (MARAAA-144), nicht pro Zeile.
     func cachedLibrary() throws -> [MealieRecipeRow] {
+        let imageBaseURL = resolveImageBaseURL()
         let rows = try context.fetch(
             FetchDescriptor<Recipe>(sortBy: [SortDescriptor(\Recipe.name)])
         )
@@ -332,7 +341,7 @@ final class MealieRepository {
                 // korrigierten Basis entstanden sein; fehlt sie ganz (Bibliothek
                 // ohne hinterlegte URL gecacht), wird sie hier mit der
                 // aktuellen Basis gebildet (MARAAA-140/M1).
-                imageURL: storedImageURL(row.imageURL) ?? imageURL(forRecipeID: row.id),
+                imageURL: storedImageURL(row.imageURL) ?? Self.imageURL(forRecipeID: row.id, baseURL: imageBaseURL),
                 totalTime: row.totalTime,
                 servings: 0
             )

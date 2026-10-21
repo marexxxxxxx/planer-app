@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# Statischer Regressionstest für MARAAA-134 und MARAAA-140: Mealie-Rezeptbilder
-# laufen authentifiziert über den NetworkClient, die Bildbasis wird erst bei
-# Zugriff aufgelöst, und Freitext-Einträge des Wochenplans (ReadPlanEntry mit
+# Statischer Regressionstest für MARAAA-134, MARAAA-140 und MARAAA-144:
+# Mealie-Rezeptbilder laufen authentifiziert über den NetworkClient, die
+# Bildbasis wird pro Ladevorgang genau einmal aufgelöst (nicht im Init und
+# nicht pro Zeile), und Freitext-Einträge des Wochenplans (ReadPlanEntry mit
 # recipeId = null) werden angezeigt — auch wenn zwei davon inhaltsgleich sind.
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
@@ -15,9 +16,10 @@
 #
 # Der Test schlägt fehl, solange Bilder über `AsyncImage`/`URLSession.shared`
 # ohne CF-/Bearer-Header laufen, die URL aus dem `image`-Token statt aus der
-# Rezept-ID entsteht, die Basis-URL im Init eingefroren wird, die Ansicht den
-# Bild-Loader an einer veralteten Adresse festmacht, Freitext-Zeilen verworfen
-# werden oder zwei inhaltsgleiche Freitext-Zeilen zu einer Cache-ID kollidieren.
+# Rezept-ID entsteht, die Basis-URL im Init eingefroren wird oder pro Zeile aus
+# der Keychain gelesen wird, die Ansicht den Bild-Loader an einer veralteten
+# Adresse festmacht, Freitext-Zeilen verworfen werden oder zwei inhaltsgleiche
+# Freitext-Zeilen zu einer Cache-ID kollidieren.
 #
 set -euo pipefail
 
@@ -73,6 +75,53 @@ forbid_body() {
     fi
 }
 
+# Belegt, dass das erste Muster in `body` vor dem zweiten steht.
+ordered() {
+    local description="$1"
+    local first="$2"
+    local second="$3"
+    local body="$4"
+    if awk -v first="$first" -v second="$second" '
+        index($0, first) { first_line = NR }
+        index($0, second) && first_line && NR > first_line { found = 1 }
+        END { exit found ? 0 : 1 }
+    ' <<<"$body"; then
+        pass "$description"
+    else
+        fail_check "$description"
+    fi
+}
+
+# count_in <Beschreibung> <Muster> <erwartet> <Datei>
+count_in() {
+    local description="$1"
+    local pattern="$2"
+    local expected="$3"
+    local file="$4"
+    local actual
+    actual="$(grep -cE "$pattern" "$file" || true)"
+    if [[ "$actual" -eq "$expected" ]]; then
+        pass "$description"
+    else
+        fail_check "$description ($file: $actual statt $expected)"
+    fi
+}
+
+# count_body <Beschreibung> <Muster> <erwartet> <Text>
+count_body() {
+    local description="$1"
+    local pattern="$2"
+    local expected="$3"
+    local body="$4"
+    local actual
+    actual="$(grep -cE "$pattern" <<<"$body" || true)"
+    if [[ "$actual" -eq "$expected" ]]; then
+        pass "$description"
+    else
+        fail_check "$description ($actual statt $expected)"
+    fi
+}
+
 # jq_ok <Beschreibung> <jq-Filter> <Datei>
 jq_ok() {
     local description="$1"
@@ -87,6 +136,7 @@ jq_ok() {
 
 dto="Planer/Features/Mealie/MealieDTO.swift"
 repo="Planer/Features/Mealie/MealieRepository.swift"
+view_model="Planer/Features/Mealie/MealieViewModel.swift"
 view="Planer/Features/Mealie/MealieView.swift"
 image_view="Planer/Features/Mealie/MealieImageView.swift"
 fixture="Tests/Fixtures/mealie_mealplan_response.json"
@@ -95,26 +145,30 @@ duplicate_fixture="Tests/Fixtures/mealie_mealplan_duplicate_text.json"
 normalize_body="$(sed -n '/func normalize() -> MealieMealPlanItem? {/,/^    }$/p' "$dto")"
 hash_body="$(sed -n '/static func hashPrefix(_ value: String) -> String {/,/^    }$/p' "$dto")"
 item_id_body="$(sed -n '/    var id: String {/,/^    }$/p' "$dto")"
-image_url_body="$(sed -n '/func imageURL(forRecipeID recipeID: String) -> URL? {/,/^    }$/p' "$repo")"
+image_url_body="$(sed -n '/static func imageURL(forRecipeID recipeID: String, baseURL: URL?) -> URL? {/,/^    }$/p' "$repo")"
 image_path_body="$(sed -n '/static func imagePath(forRecipeID recipeID: String) -> String? {/,/^    }$/p' "$repo")"
 fetch_body="$(sed -n '/func fetchImageData(forRecipeID recipeID: String) async throws -> Data {/,/^    }$/p' "$repo")"
 plan_body="$(sed -n '/private func planRow(_ item: MealieMealPlanItem) -> some View {/,/^    }$/p' "$view")"
 thumbnail_body="$(sed -n '/private func thumbnail(_ row: MealieRecipeRow) -> some View {/,/^    }$/p' "$view")"
 init_body="$(sed -n '/^    init(/,/^    }$/p' "$repo")"
-image_base_body="$(sed -n '/private var imageBaseURL: URL? {/,/^    }$/p' "$repo")"
+image_base_body="$(sed -n '/func resolveImageBaseURL() -> URL? {/,/^    }$/p' "$repo")"
+row_body="$(sed -n '/func row(from summary: MealieRecipeSummary, imageBaseURL: URL?) -> MealieRecipeRow? {/,/^    }$/p' "$repo")"
+library_body="$(sed -n '/func cachedLibrary() throws -> \[MealieRecipeRow\] {/,/^    }$/p' "$repo")"
+reload_body="$(sed -n '/private func reloadLibrary(cacheResults: Bool) async {/,/^    }$/p' "$view_model")"
+load_more_body="$(sed -n '/private func loadMore() async {/,/^    }$/p' "$view_model")"
 load_key_body="$(sed -n '/private var loadKey: String {/,/^    }$/p' "$image_view")"
 entry_parser_body="$(sed -n '/static func entryID(fromPlanCacheID id: String) -> String? {/,/^    }$/p' "$repo")"
 entry_struct_body="$(sed -n '/^struct MealiePlanEntry: Decodable, Equatable {/,/^}$/p' "$dto")"
 
 # 1. Bild-URL aus der Rezept-ID, Bilddaten über NetworkClient.send.
 require "MealieRepository bildet die Bild-URL aus der Rezept-ID" \
-    'func imageURL\(forRecipeID recipeID: String\) -> URL\?' "$repo"
+    'static func imageURL\(forRecipeID recipeID: String, baseURL: URL\?\) -> URL\?' "$repo"
 require_body "Bild-Route ist /media/recipes/{id}/images/original.webp" \
     'media/recipes/.*/images/original\.webp' "$image_path_body"
 require_body "Bild-URL hängt an die API-Basis die Bild-Route" \
     'Self\.imagePath\(forRecipeID: recipeID\)' "$image_url_body"
 require "Bibliothekszeile nutzt die Rezept-ID für die Bild-URL" \
-    'imageURL: recipeID\.flatMap \{ imageURL\(forRecipeID: \$0\) \}' "$repo"
+    'imageURL: recipeID\.flatMap \{ Self\.imageURL\(forRecipeID: \$0, baseURL: imageBaseURL\) \}' "$repo"
 forbid "Bild-URL entsteht nicht aus dem image-Token" \
     'summary\.image\?\.path' "$repo"
 require "MealieRepository lädt Bilddaten" \
@@ -193,17 +247,39 @@ require "Fixture enthält einen Eintrag ohne Rezept-ID" \
 require "Fixture enthält einen Freitext-Eintrag" \
     '"text": "Reste"' "$fixture"
 
-# 5. MARAAA-140 M1: Bildbasis wird bei Zugriff aufgelöst, nicht im Init.
-require "Bildbasis ist eine bei Zugriff aufgelöste Eigenschaft" \
-    'private var imageBaseURL: URL\? \{' "$repo"
-require_body "Bildbasis wird bei jedem Zugriff aus der Keychain gelesen" \
+# 5. MARAAA-140 M1 / MARAAA-144: Bildbasis wird pro Ladevorgang aufgelöst,
+#    nicht im Init und nicht pro Zeile.
+require "Bildbasis wird über eine Auflösungsmethode gelesen" \
+    'func resolveImageBaseURL\(\) -> URL\? \{' "$repo"
+require_body "Auflösungsmethode liest aus der Keychain" \
     'ServiceConfiguration\.load\(\.mealie, keychain: keychain\)' "$image_base_body"
 forbid_body "Init friert die Bildbasis nicht mehr ein" \
     'imageBaseURL' "$init_body"
 forbid "kein zwischengespeicherter Basis-Wert im Repository" \
     'self\.imageBaseURL' "$repo"
-require_body "Bild-URL nutzt die bei Zugriff aufgelöste Basis" \
-    'guard let base = imageBaseURL' "$image_url_body"
+require_body "Bild-URL nutzt die hereingereichte Basis" \
+    'guard let base = baseURL' "$image_url_body"
+count_in "genau eine Keychain-Auflösungsstelle im Repository" \
+    'ServiceConfiguration\.load\(' 1 "$repo"
+count_body "Zeilenbildung löst die Basis einmal vor der Schleife" \
+    'resolveImageBaseURL\(\)' 1 "$library_body"
+forbid_body "Zeilen-Mapping liest die Keychain nicht selbst" \
+    'ServiceConfiguration\.load|keychain|resolveImageBaseURL' "$row_body"
+ordered "Zeilenbildung löst die Basis vor dem Zeilen-Mapping" \
+    'let imageBaseURL = resolveImageBaseURL()' \
+    '.map { row in' "$library_body"
+forbid "ViewModel liest die Keychain nicht direkt" \
+    'ServiceConfiguration\.load' "$view_model"
+count_body "Bibliotheksaufbau löst die Basis einmal pro Ladevorgang" \
+    'repository\.resolveImageBaseURL\(\)' 1 "$reload_body"
+ordered "Bibliotheksaufbau löst die Basis vor dem Zeilen-Mapping" \
+    'let imageBaseURL = repository.resolveImageBaseURL()' \
+    'repository.row(from: $0, imageBaseURL: imageBaseURL)' "$reload_body"
+count_body "Nachladen löst die Basis einmal pro Ladevorgang" \
+    'repository\.resolveImageBaseURL\(\)' 1 "$load_more_body"
+ordered "Nachladen löst die Basis vor dem Zeilen-Mapping" \
+    'let imageBaseURL = repository.resolveImageBaseURL()' \
+    'repository.row(from: $0, imageBaseURL: imageBaseURL)' "$load_more_body"
 require "Bibliothekszeile trägt die Rezept-ID für die Bild-Route" \
     'let imageID: String\?' "$dto"
 require "Bibliothekszeile setzt imageID aus der Rezept-ID" \

@@ -190,7 +190,8 @@ final class MealieViewModel: ObservableObject {
     private func reloadLibrary(cacheResults: Bool) async {
         do {
             let result = try await repository.searchRecipes(query: query, page: 1, perPage: perPage)
-            let rows = result.items.compactMap { repository.row(from: $0) }
+            let imageBaseURL = repository.resolveImageBaseURL()
+            let rows = result.items.compactMap { repository.row(from: $0, imageBaseURL: imageBaseURL) }
             recipes = rows
             nextPage = result.pagination.page + 1
             hasMoreRecipes = result.pagination.page < result.pagination.totalPages
@@ -223,7 +224,8 @@ final class MealieViewModel: ObservableObject {
         defer { isLoadingMore = false }
         do {
             let result = try await repository.searchRecipes(query: query, page: nextPage, perPage: perPage)
-            let rows = result.items.compactMap { repository.row(from: $0) }
+            let imageBaseURL = repository.resolveImageBaseURL()
+            let rows = result.items.compactMap { repository.row(from: $0, imageBaseURL: imageBaseURL) }
             recipes.append(contentsOf: rows.filter { row in !recipes.contains { $0.id == row.id } })
             nextPage = result.pagination.page + 1
             hasMoreRecipes = result.pagination.page < result.pagination.totalPages

@@ -173,7 +173,7 @@ run_checks() {
         pass "MealieRecipeSummary führt image nicht als Feld"
     fi
     require_fixed "Bild-URL entsteht aus der Rezept-ID, nicht aus dem Token" \
-        'imageURL: recipeID.flatMap { imageURL(forRecipeID: $0) }' "$mealie_repo"
+        'imageURL: recipeID.flatMap { Self.imageURL(forRecipeID: $0, baseURL: imageBaseURL) }' "$mealie_repo"
     forbid_regex "Bild-URL greift nicht auf summary.image zu" \
         'summary\.image[^`]' "$mealie_repo"
 
