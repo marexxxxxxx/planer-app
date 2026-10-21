@@ -112,7 +112,16 @@ final class GrocyRepository {
         static let addProduct = "/stock/shoppinglist/add-product"
     }
 
+    /// Ein Versuch und vier Sekunden für den Einheitenabruf.
+    ///
+    /// Die Einheiten sind ein Zusatz: Bestand und Einkaufsliste sind ohne sie
+    /// gültig. Die GET-Regel aus `RetryPolicy.default` (3 × 10 s plus Backoff)
+    /// hielte den Tab deshalb bis zu 31,5 s auf (MARAAA-141 M2).
+    private static let unitsRetryPolicy = RetryPolicy(maxAttempts: 1)
+    private static let unitsTimeout: TimeInterval = 4
+
     private let client: NetworkClient
+    private let unitsClient: NetworkClient
     private let context: ModelContext
     private let now: () -> Date
     private let calendar: Calendar
@@ -138,6 +147,10 @@ final class GrocyRepository {
         calendar: Calendar = .current
     ) {
         self.client = client
+        self.unitsClient = NetworkClient(
+            retryPolicy: GrocyRepository.unitsRetryPolicy,
+            timeout: GrocyRepository.unitsTimeout
+        )
         self.context = context
         self.now = now
         self.calendar = calendar
@@ -193,35 +206,28 @@ final class GrocyRepository {
 
     // MARK: - Netz
 
-    /// `GET /api/stock` in der Normalform aus §2.3.
+    /// `GET /api/stock` als Rohzeilen.
     ///
-    /// Die Einheit steht dort nur als `product.qu_id_stock`; `unitNames` löst
-    /// sie auf (siehe `fetchQuantityUnits()`).
-    func fetchStock(unitNames: [Int: String] = [:]) async throws -> [GrocyStockItem] {
-        let entries = try await client.send(
+    /// Die Einheit steht dort nur als `product.qu_id_stock`; `normalizeStock`
+    /// löst sie über die Namensmap auf. Abruf und Auflösen sind getrennt, damit
+    /// `refresh()` den Abruf starten kann, bevor die Einheiten vorliegen
+    /// (MARAAA-141 M2).
+    private func fetchStockEntries() async throws -> [GrocyStockEntry] {
+        try await client.send(
             APIRequest(method: .get, path: Path.stock),
             for: .grocy,
             as: [GrocyStockEntry].self
         )
-        let today = now()
-        return entries.compactMap {
-            $0.normalize(today: today, calendar: calendar, unitNames: unitNames)
-        }
     }
 
-    /// `GET /api/objects/shopping_list`; Produktnamen kommen aus dem Katalog,
-    /// weil die Liste nur `product_id` trägt. `unitNames` löst `qu_id` auf.
-    func fetchShoppingList(
-        catalog: [GrocyProduct],
-        unitNames: [Int: String] = [:]
-    ) async throws -> [GrocyShoppingItem] {
-        let entries = try await client.send(
+    /// `GET /api/objects/shopping_list` als Rohzeilen; Produktnamen kommen aus
+    /// dem Katalog, weil die Liste nur `product_id` trägt.
+    private func fetchShoppingListEntries() async throws -> [GrocyShoppingEntry] {
+        try await client.send(
             APIRequest(method: .get, path: Path.shoppingList),
             for: .grocy,
             as: [GrocyShoppingEntry].self
         )
-        let byID = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        return entries.map { $0.normalize(catalog: byID, unitNames: unitNames) }
     }
 
     /// `GET /api/objects/products` — Quelle der Autovervollständigung.
@@ -234,8 +240,11 @@ final class GrocyRepository {
     }
 
     /// `GET /api/objects/quantity_units` als Nachschlagetabelle ID → Name.
+    ///
+    /// Läuft über `unitsClient` (ein Versuch, kurzer Timeout), weil der Abruf
+    /// ein Zusatz und kein Pflichtteil des Snapshots ist.
     func fetchQuantityUnits() async throws -> [Int: String] {
-        let units = try await client.send(
+        let units = try await unitsClient.send(
             APIRequest(method: .get, path: Path.quantityUnits),
             for: .grocy,
             as: [GrocyQuantityUnit].self
@@ -247,18 +256,31 @@ final class GrocyRepository {
     /// Cache (§3.2).
     ///
     /// Grocy ist autoritativ: der Cache wird vollständig ersetzt, nicht gemischt.
-    /// Ein Fehler beim Einheitenabruf ist nicht fatal: der Tab bleibt benutzbar,
-    /// die Einheit bleibt leer und `unitsUnavailable` meldet den Ausfall.
+    /// Alle vier Abrufe laufen gleichzeitig; Bestand und Einkaufsliste warten
+    /// nicht auf die Einheiten, weil sie ohne Einheitennamen gültig sind
+    /// (MARAAA-141 M2). Die Namensmap wird erst beim Auflösen angewandt. Ein
+    /// Fehler beim Einheitenabruf ist nicht fatal: die Einheit bleibt leer und
+    /// `unitsUnavailable` meldet den Ausfall.
     @discardableResult
     func refresh() async throws -> GrocySnapshot {
         async let catalogTask = fetchCatalog()
         async let unitsTask = loadQuantityUnits()
-        let (catalog, units) = try await (catalogTask, unitsTask)
-        async let stockTask = fetchStock(unitNames: units.names)
-        async let shoppingTask = fetchShoppingList(catalog: catalog, unitNames: units.names)
-        let (stock, shopping) = try await (stockTask, shoppingTask)
+        async let stockEntriesTask = fetchStockEntries()
+        async let shoppingEntriesTask = fetchShoppingListEntries()
+
+        let catalog = try await catalogTask
+        let stockEntries = try await stockEntriesTask
+        let shoppingEntries = try await shoppingEntriesTask
+        let units = await unitsTask
 
         let fetchedAt = now()
+        let stock = normalizeStock(stockEntries, unitNames: units.names, today: fetchedAt)
+        let shopping = normalizeShoppingList(
+            shoppingEntries,
+            catalog: catalog,
+            unitNames: units.names
+        )
+
         try upsertStock(stock, fetchedAt: fetchedAt)
         try upsertShopping(shopping, fetchedAt: fetchedAt)
         try context.save()
@@ -268,6 +290,28 @@ final class GrocyRepository {
             catalog: catalog,
             unitsUnavailable: units.unavailable
         )
+    }
+
+    /// Bestands-Rohzeilen in die Normalform aus §2.3 übersetzen.
+    private func normalizeStock(
+        _ entries: [GrocyStockEntry],
+        unitNames: [Int: String],
+        today: Date
+    ) -> [GrocyStockItem] {
+        entries.compactMap {
+            $0.normalize(today: today, calendar: calendar, unitNames: unitNames)
+        }
+    }
+
+    /// Einkaufs-Rohzeilen in die Normalform aus §3.2 übersetzen: Produktnamen
+    /// aus dem Katalog, Einheiten aus der Namensmap.
+    private func normalizeShoppingList(
+        _ entries: [GrocyShoppingEntry],
+        catalog: [GrocyProduct],
+        unitNames: [Int: String]
+    ) -> [GrocyShoppingItem] {
+        let byID = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return entries.map { $0.normalize(catalog: byID, unitNames: unitNames) }
     }
 
     /// Einheitenabruf, der den Tab bei einem Fehler nicht mitzieht.

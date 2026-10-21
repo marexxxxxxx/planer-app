@@ -2,6 +2,8 @@
 #
 # Statischer Regressionstest für MARAAA-135: Grocy-Einheiten in Vorrat und
 # Einkaufsliste auflösen und die Tastatur beim Scrollen ausblenden.
+# Ergänzt um MARAAA-141 (Review M2): der Einheitenabruf darf den Tab nicht
+# aufhalten, wenn `/objects/quantity_units` hängt oder 5xx liefert.
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen Abnahmen laufen ebenfalls über grep-/Fixture-Prüfungen. Der Test
@@ -11,6 +13,11 @@
 #   - `/api/objects/quantity_units` liefert `{id,name}`.
 # Der Test schlägt fehl, solange die Einheitenmap nicht geladen/übergeben wird,
 # die DTOs die IDs nicht dekodieren oder ein Einheitenfehler den Tab mitzieht.
+#
+# Zeitgrenze (MARAAA-141 M2): Der Einheitenabruf läuft mit einem Versuch und
+# `unitsTimeout` = 4 s; Bestand und Einkaufsliste werden gleichzeitig gestartet
+# und erst nach dem Einheitenabruf aufgelöst. Ein 503 kostet damit einen
+# Fehlversuch, ein hängender Endpunkt höchstens 4 s — nicht 3 × 10 s + Backoff.
 #
 set -euo pipefail
 
@@ -55,6 +62,37 @@ forbid() {
     fi
 }
 
+forbid_body() {
+    local description="$1"
+    local pattern="$2"
+    local body="$3"
+    if grep -qE "$pattern" <<<"$body"; then
+        fail_check "$description"
+    else
+        pass "$description"
+    fi
+}
+
+# Prüft einen Ausdruck über mehrere Zeilen: Zeilenumbrüche und Einrückung
+# werden zu einem Leerzeichen zusammengefasst.
+require_body_flat() {
+    local description="$1"
+    local pattern="$2"
+    local body="$3"
+    if tr -s '[:space:]' ' ' <<<"$body" | grep -qE "$pattern"; then
+        pass "$description"
+    else
+        fail_check "$description"
+    fi
+}
+
+# Zeilennummer des ersten Treffers im Rumpf; leer, wenn nichts passt.
+body_line() {
+    local pattern="$1"
+    local body="$2"
+    awk -v p="$pattern" '$0 ~ p { print NR; exit }' <<<"$body"
+}
+
 dto="Planer/Features/Grocy/GrocyDTO.swift"
 repo="Planer/Features/Grocy/GrocyRepository.swift"
 view="Planer/Features/Grocy/GrocyView.swift"
@@ -67,6 +105,8 @@ shopping_fixture="Tests/Fixtures/grocy_shopping_list_raw.json"
 units_body="$(sed -n '/func fetchQuantityUnits() async throws -> \[Int: String\] {/,/^    }$/p' "$repo")"
 load_units_body="$(sed -n '/private func loadQuantityUnits() async -> (names: \[Int: String\], unavailable: Bool) {/,/^    }$/p' "$repo")"
 refresh_body="$(sed -n '/func refresh() async throws -> GrocySnapshot {/,/^    }$/p' "$repo")"
+stock_entries_body="$(sed -n '/private func fetchStockEntries() async throws -> \[GrocyStockEntry\] {/,/^    }$/p' "$repo")"
+shopping_entries_body="$(sed -n '/private func fetchShoppingListEntries() async throws -> \[GrocyShoppingEntry\] {/,/^    }$/p' "$repo")"
 resolved_unit_body="$(sed -n '/private func resolvedUnitName(unitNames: \[Int: String\]) -> String {/,/^    }$/p' "$dto")"
 stock_normalize_body="$(awk '/func normalize\($/{count++} count==1{print} count==2{exit}' "$dto")"
 shopping_normalize_body="$(awk '/func normalize\($/{count++} count==2{print}' "$dto")"
@@ -76,18 +116,22 @@ require "GrocyRepository kennt den Einheiten-Endpunkt" \
     'static let quantityUnits = "/objects/quantity_units"' "$repo"
 require "GrocyRepository lädt die Einheiten als ID-Name-Map" \
     'func fetchQuantityUnits\(\) async throws -> \[Int: String\]' "$repo"
-require_body "Einheiten laufen über NetworkClient.send" \
-    'client\.send\(' "$units_body"
+require_body "Einheiten laufen über den eigenen Client" \
+    'unitsClient\.send\(' "$units_body"
 require_body "Einheiten werden für den Dienst grocy gesendet" \
     'for: \.grocy' "$units_body"
 require_body "Einheiten werden als GrocyQuantityUnit dekodiert" \
     'as: \[GrocyQuantityUnit\]\.self' "$units_body"
 require_body "refresh lädt die Einheiten mit" \
     'async let unitsTask = loadQuantityUnits\(\)' "$refresh_body"
-require_body "refresh übergibt die Namensmap an den Bestand" \
-    'fetchStock\(unitNames: units\.names\)' "$refresh_body"
-require_body "refresh übergibt die Namensmap an die Einkaufsliste" \
-    'fetchShoppingList\(catalog: catalog, unitNames: units\.names\)' "$refresh_body"
+require_body_flat "Bestandsabruf startet ohne Einheiten" \
+    'async let stockEntriesTask = fetchStockEntries\(\)' "$refresh_body"
+require_body_flat "Einkaufsabruf startet ohne Einheiten" \
+    'async let shoppingEntriesTask = fetchShoppingListEntries\(\)' "$refresh_body"
+require_body_flat "refresh löst den Bestand mit der Namensmap auf" \
+    'normalizeStock\(stockEntries, unitNames: units\.names, today: fetchedAt\)' "$refresh_body"
+require_body_flat "refresh löst die Einkaufsliste mit der Namensmap auf" \
+    'normalizeShoppingList\( shoppingEntries, catalog: catalog, unitNames: units\.names \)' "$refresh_body"
 require_body "refresh meldet den Einheitenausfall im Snapshot" \
     'unitsUnavailable: units\.unavailable' "$refresh_body"
 require_body "Einheitenfehler liefert eine leere Map statt zu werfen" \
@@ -133,10 +177,10 @@ require "GrocySnapshot meldet den Einheitenausfall" \
     'let unitsUnavailable: Bool' "$repo"
 require "Snapshot-Initialisierer bleibt ohne Ausfall aufrufbar" \
     'unitsUnavailable: Bool = false' "$repo"
-require_body "fetchStock bleibt ohne Namensmap aufrufbar" \
-    'unitNames: \[Int: String\] = \[:\]' "$(sed -n '/func fetchStock/,/^    }$/p' "$repo")"
-require_body "fetchShoppingList bleibt ohne Namensmap aufrufbar" \
-    'unitNames: \[Int: String\] = \[:\]' "$(sed -n '/func fetchShoppingList/,/^    }$/p' "$repo")"
+require_body "Bestandsabruf dekodiert Rohzeilen" \
+    'as: \[GrocyStockEntry\]\.self' "$stock_entries_body"
+require_body "Einkaufsabruf dekodiert Rohzeilen" \
+    'as: \[GrocyShoppingEntry\]\.self' "$shopping_entries_body"
 require "ViewModel meldet fehlende Einheiten im Banner" \
     'Einheiten konnten nicht geladen werden' "$model"
 
@@ -197,6 +241,38 @@ if [[ "$missing_shopping" -eq 0 ]]; then
     pass "alle Einkaufs-qu_ids sind in der Einheitenmap auflösbar"
 else
     fail_check "alle Einkaufs-qu_ids sind in der Einheitenmap auflösbar (fehlen: $missing_shopping)"
+fi
+
+# 6. MARAAA-141 M2: Der Einheitenabruf blockiert den Tab nicht mehr.
+require "Einheitenabruf läuft mit genau einem Versuch" \
+    'RetryPolicy\(maxAttempts: 1\)' "$repo"
+require "Einheitenabruf hat einen eigenen, benannten Timeout" \
+    'unitsTimeout: TimeInterval = [0-9]+' "$repo"
+
+units_timeout="$(sed -n 's/.*unitsTimeout: TimeInterval = \([0-9][0-9]*\).*/\1/p' "$repo" | head -1)"
+if [[ -n "$units_timeout" && "$units_timeout" -ge 1 && "$units_timeout" -le 5 ]]; then
+    pass "Einheiten-Timeout ist ${units_timeout} s (≤ 5 s)"
+else
+    fail_check "Einheiten-Timeout ist ≤ 5 s (gefunden: '${units_timeout}')"
+fi
+
+forbid_body "Einheiten werden nicht gemeinsam mit dem Bestand abgewartet" \
+    'try await \(catalogTask, unitsTask\)' "$refresh_body"
+
+stock_start="$(body_line 'async let stockEntriesTask' "$refresh_body")"
+shopping_start="$(body_line 'async let shoppingEntriesTask' "$refresh_body")"
+units_wait="$(body_line 'let units = await unitsTask' "$refresh_body")"
+
+if [[ -n "$stock_start" && -n "$units_wait" && "$stock_start" -lt "$units_wait" ]]; then
+    pass "Bestand startet vor dem Warten auf die Einheiten"
+else
+    fail_check "Bestand startet vor dem Warten auf die Einheiten (Bestand: '${stock_start}', Einheiten: '${units_wait}')"
+fi
+
+if [[ -n "$shopping_start" && -n "$units_wait" && "$shopping_start" -lt "$units_wait" ]]; then
+    pass "Einkaufsliste startet vor dem Warten auf die Einheiten"
+else
+    fail_check "Einkaufsliste startet vor dem Warten auf die Einheiten (Einkauf: '${shopping_start}', Einheiten: '${units_wait}')"
 fi
 
 if [[ "$fail" -ne 0 ]]; then
