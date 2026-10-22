@@ -154,7 +154,18 @@ entfällt (er würde am API-Server mit 404 scheitern). Bleibt das Feld leer,
 gilt unverändert der oben beschriebene Password-Login gegen das Dashboard.
 Der Verbindungstest fragt für Hermes `GET /v1/models` ab und erkennt daran den
 API-Server; 405 und eine Weiterleitung auf `/login` werden als
-„Dashboard statt API-Server“ gemeldet.
+„Dashboard statt API-Server“ gemeldet. Scheitert `/v1/models` (3xx, 2xx-HTML, 404/405 oder Transportfehler), fragt er
+zusätzlich `GET /api/status` ab und wertet `gateway_platforms.api_server` aus:
+Die Meldung nennt den gemeldeten Zustand (`state`) und die `listener_base`.
+Loopback (`127.0.0.1`/`localhost`/`::1`) heißt „nur auf dem Server selbst
+erreichbar“ und verweist auf eine gemeinsame HTTPS-Adresse (hermes-front hinter
+dem Tunnel); `0.0.0.0`/`::` heißt „alle Interfaces“, dann muss HTTPS
+davorstehen; eine konkrete Adresse wird nur als HTTPS-Basis-URL genannt.
+`0.0.0.0` und `http://` werden nie zum Eintragen empfohlen, und ein fehlender
+`state` wird nicht als „nicht verbunden“ behauptet. 401 `gateway_auth_failed`
+und 403 behalten ihre bisherigen Meldungen. Siehe
+[`docs/hermes-405-diagnose.md`](docs/hermes-405-diagnose.md), Abschnitt
+„Was die curl-Ausgaben bedeuten“.
 
 Unabhängig von der Betriebsart trägt jeder Hermes-Request den Header
 `X-Hermes-Client: planer`; ein vorgeschalteter Proxy kann darüber App- und

@@ -95,6 +95,64 @@ Der API-Server prüft ausschließlich `Authorization: Bearer <API_SERVER_KEY>`
 ausgewertet. Seine Fähigkeitstabelle (`_CAPABILITY_ENDPOINTS`) enthält genau die
 Endpunkte, die die App im Chat nutzt, inklusive `session_create` (`POST /api/sessions`).
 
+## Was die curl-Ausgaben bedeuten
+
+Die folgenden Aufrufe werden auf dem Hermes-Server ausgeführt; sie trennen die
+beiden Oberflächen und die Bindungsadresse des API-Servers.
+
+| Aufruf | Antwort | Bedeutung |
+|---|---|---|
+| `curl http://127.0.0.1:9119/api/status` | `200` | Dashboard-Status; enthält `gateway_platforms.api_server.listener_base` und `state` des API-Servers. |
+| `curl http://127.0.0.1:8642/` | `404: Not Found` | Der API-Server läuft, hat aber keine Route `/`. |
+| `curl http://127.0.0.1:8642/api/status` | `404` | `/api/status` ist eine Dashboard-Route, keine API-Server-Route. |
+| `curl http://192.168.9.2:8642` | `Failed to connect` | Der API-Server bindet nur `127.0.0.1` (Hermes-Default `API_SERVER_HOST`). |
+| `curl -H "Authorization: Bearer $API_SERVER_KEY" http://127.0.0.1:8642/v1/models` | `200` | Der API-Server ist gesund; nur der Weg von außen fehlt. |
+
+Die ersten beiden Zeilen sind kein Fehler, sondern der Normalfall: Dashboard
+und API-Server sind getrennte Prozesse mit getrennten Routen. Ein
+`Failed to connect` auf die LAN-Adresse bedeutet dagegen nicht, dass der
+API-Server aus ist — er lauscht nur auf Loopback. Genau das wertet der
+Verbindungstest der App aus: Nach einem nicht erfolgreichen `GET /v1/models`
+fragt er für Hermes zusätzlich `GET /api/status` ab und nennt die dort
+gemeldete `listener_base`.
+
+### Zwei zulässige Betriebsarten
+
+**(1) Eine URL über hermes-front (empfohlen).** Der Caddy-Proxy lauscht auf
+`127.0.0.1:9180` und verteilt Dashboard- und API-Verkehr; der Cloudflare-Tunnel
+zeigt auf ihn. In der App steht dann genau eine Adresse:
+
+```
+Cloudflare Zero Trust → Tunnel → Public Hostname
+  Dienst:  http://localhost:9180      (vorher http://localhost:9119)
+App-Basis-URL:  https://<domain>      (ohne Pfad)
+App:            API-Schlüssel = API_SERVER_KEY
+```
+
+**(2) Direkt auf den API-Server.** Dafür muss der Listener an alle Interfaces
+gebunden werden:
+
+```
+# ~/.hermes/.env bzw. Dienstumgebung
+API_SERVER_HOST=0.0.0.0
+API_SERVER_KEY=<schlüssel>
+
+grep '^API_SERVER_KEY=' ~/.hermes/.env | cut -d= -f2-   # Schlüssel anzeigen
+```
+
+`hermes config get API_SERVER_KEY --raw` ist hier **kein** tauglicher Weg: Steht
+der Schlüssel nur in `~/.hermes/.env`, antwortet der Befehl mit
+`Config key not set: API_SERVER_KEY` (rc=1). Deshalb den Wert direkt aus der
+`.env` lesen (oben) und nicht in Dateien oder Logs schreiben.
+
+Die App akzeptiert **nur HTTPS** (Ausnahme: `http` auf `localhost`/
+`127.0.0.1`, MARAAA-98). Ein Direktzugriff auf `http://<host>:8642` ist darum
+keine gültige Basis-URL; für Betriebsart (2) braucht der Port eine
+TLS-Terminierung (Reverse Proxy oder Tunnel), und die App bekommt deren
+`https://…`-Adresse. `0.0.0.0` ist keine verbindbare Adresse und darf nie als
+Basis-URL eingetragen werden — es beschreibt nur, dass der Listener auf allen
+Interfaces lauscht.
+
 ## Was daraus folgt
 
 Eine einzige Basis-URL kann mit dem heutigen Hermes nur eine der beiden Oberflächen
@@ -161,9 +219,11 @@ WS  /api/pty                             -> 403 (Dashboard-Auth), kein 502/504
 1. **Cloudflare-Tunnel** (Zero Trust → Tunnel → Public Hostname): Dienst von
    `http://localhost:9119` auf `http://localhost:9180` umstellen. Der alte Wert ist der
    Rückweg; der Proxy selbst lauscht nur auf Loopback, es wird nichts neu veröffentlicht.
-2. **`API_SERVER_KEY`** auslesen (`hermes -p <profil> config get API_SERVER_KEY --raw`)
-   und in der App hinterlegen — der Schlüssel gehört in die Keychain, nicht ins Repo und
-   nicht in die Proxy-Konfiguration.
+2. **`API_SERVER_KEY`** auslesen
+   (`grep '^API_SERVER_KEY=' ~/.hermes/.env | cut -d= -f2-`) und in der App
+   hinterlegen — der Schlüssel gehört in die Keychain, nicht ins Repo und nicht
+   in die Proxy-Konfiguration. `hermes config get API_SERVER_KEY --raw` meldet
+   `Config key not set: API_SERVER_KEY`, wenn der Wert nur in der `.env` steht.
 3. **In der App:** Hermes-Basis-URL = `https://hermes.example.com` (ohne Pfad), Feld
    „API-Schlüssel (API-Server)“ ausfüllen. „Test Verbindung“ muss
    „Verbindung erfolgreich (Hermes-API-Server).“ melden.

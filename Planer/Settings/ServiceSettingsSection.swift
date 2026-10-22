@@ -13,9 +13,10 @@ import SwiftUI
 /// Zweck: Basis-URL, CF-Access-Paar und den dienstspezifischen API-Account
 /// erfassen, die URL auf den vom Dienst erwarteten `/api`-Pfad normalisieren
 /// und ausschließlich über `KeychainManager` speichern.
-/// Grenze: keine Anzeige von Server-Daten; „Test Verbindung“ ruft genau einen
-/// fachlichen Endpunkt ab und unterscheidet Erfolg, Token-Fehler, Cloudflare
-/// Access und falschen Pfad.
+/// Grenze: keine Anzeige von Server-Daten; „Test Verbindung“ ruft je Dienst
+/// einen fachlichen Endpunkt ab und unterscheidet Erfolg, Token-Fehler,
+/// Cloudflare Access und falschen Pfad. Nur Hermes fragt bei einem
+/// nicht verwertbaren Ergebnis zusätzlich `/api/status` ab (Dashboard-Diagnose).
 struct ServiceSettingsSection: View {
     let service: ServiceType
 
@@ -220,7 +221,9 @@ struct ServiceSettingsSection: View {
     /// Origin und trägt `/api` selbst im Pfad. Für Hermes prüft der Test
     /// `/v1/models` ohne Query: Dieser Endpunkt existiert nur auf dem
     /// API-Server (Port 8642) und beweist damit zugleich die richtige Oberfläche;
-    /// das Dashboard antwortet dort mit 405 oder einer Weiterleitung.
+    /// das Dashboard antwortet dort mit 405 oder einer Weiterleitung. Scheitert
+    /// der Schritt, fragt `testConnection` für Hermes zusätzlich `/api/status`
+    /// ab und nennt die dort gemeldete API-Server-Adresse (MARAAA-159).
     private var connectionTestRequest: APIRequest {
         switch service {
         case .mealie:
@@ -244,6 +247,11 @@ struct ServiceSettingsSection: View {
 
     /// Speichert die normalisierte URL und prüft danach den fachlichen
     /// Endpunkt. Erfolg ist ausschließlich 2xx **und** JSON.
+    ///
+    /// Hermes hat einen eigenen Pfad: `/v1/models` endet am Dashboard mit 3xx,
+    /// 2xx-HTML oder 401, und der Client wirft beim Redirect/Re-Login. Darum
+    /// fängt `testHermesConnection` den Fehler lokal ab; `connectionMessage`
+    /// ist dort nur noch Rückfall, nicht Endstation.
     private func testConnection() async {
         isTesting = true
         defer { isTesting = false }
@@ -260,6 +268,11 @@ struct ServiceSettingsSection: View {
             return
         }
 
+        if service == .hermes {
+            await testHermesConnection()
+            return
+        }
+
         do {
             let (data, response) = try await client.sendRaw(connectionTestRequest, for: service)
             message = Self.connectionMessage(
@@ -270,6 +283,136 @@ struct ServiceSettingsSection: View {
             )
         } catch {
             message = error.localizedDescription
+        }
+    }
+
+    /// Verbindungstest für Hermes: erst `/v1/models`, bei Bedarf `/api/status`.
+    ///
+    /// Zweck: Am Dashboard antwortet `/v1/models` mit 302, 2xx-HTML oder 401;
+    /// ein geworfener Fehler würde die Meldung sonst durch „Hermes-Anmeldung
+    /// erforderlich“ ersetzen, obwohl die Ursache die verwechselte Oberfläche
+    /// ist. Der erste Request wird darum lokal abgefangen. Erfolg ist nur 2xx
+    /// **und** JSON, das nach API-Server aussieht; 401 `gateway_auth_failed`
+    /// und 403 behalten ihre bestehenden Meldungen.
+    /// Grenze: Alle übrigen Fälle fragen `/api/status`; eine verwertbare
+    /// Antwort setzt **eine** endgültige Meldung und ersetzt die erste. Ist
+    /// `/api/status` nicht verwertbar, bleibt die Meldung aus
+    /// `connectionMessage` bzw. der Transportfehler erhalten.
+    private func testHermesConnection() async {
+        var status: Int?
+        var responseBody = Data()
+        var response: HTTPURLResponse?
+        var transportError: Error?
+        do {
+            let result = try await client.sendRaw(connectionTestRequest, for: service)
+            status = result.response.statusCode
+            responseBody = result.data
+            response = result.response
+        } catch {
+            transportError = error
+        }
+
+        if let status, (200..<300).contains(status), Self.isHermesAPIServerPayload(responseBody) {
+            message = "Verbindung erfolgreich (Hermes-API-Server)."
+            return
+        }
+        if let status, status == 401, Self.isGatewayAuthFailure(responseBody) {
+            // Der API-Server ist erreichbar, aber der Schlüssel fehlt oder ist
+            // falsch; dieselbe Meldung wie im Chat-Pfad (APIError).
+            message = APIError.hermesAPIServerKeyRequired.localizedDescription
+            return
+        }
+        if let status, let response, status == 403 {
+            // Cloudflare Access antwortet vor jedem Dienst; diese Meldung wird
+            // nicht von der Dashboard-Diagnose verdrängt.
+            message = Self.connectionMessage(
+                status: status,
+                data: responseBody,
+                response: response,
+                service: service
+            )
+            return
+        }
+
+        if let diagnosis = await hermesDashboardDiagnosis() {
+            message = diagnosis
+            return
+        }
+        if let status, let response {
+            message = Self.connectionMessage(
+                status: status,
+                data: responseBody,
+                response: response,
+                service: service
+            )
+        } else {
+            message = transportError?.localizedDescription
+                ?? "Hermes antwortet nicht und der Dashboard-Status ist nicht lesbar."
+        }
+    }
+
+    /// Fragt den Dashboard-Status ab und formuliert daraus eine Meldung.
+    ///
+    /// Zweck: `GET /api/status` existiert nur auf dem Dashboard; seine Antwort
+    /// nennt `gateway_platforms.api_server` mit Zustand und `listener_base`.
+    /// Damit wird aus „404/405/3xx/Transportfehler“ eine Handlungsanweisung.
+    /// Grenze: Die Antwort muss 2xx und dekodierbares JSON sein; alles andere
+    /// ergibt `nil`, damit die erste Meldung erhalten bleibt.
+    private func hermesDashboardDiagnosis() async -> String? {
+        let request = APIRequest(method: .get, path: "/api/status")
+        guard let (data, response) = try? await client.sendRaw(request, for: .hermes),
+              (200..<300).contains(response.statusCode),
+              let dashboard = try? JSONDecoder().decode(HermesDashboardStatus.self, from: data)
+        else {
+            return nil
+        }
+        // `classify` bekommt hier bewusst keinen `/v1/models`-Status: Der
+        // Aufrufer hat bereits entschieden, dass die erste Antwort kein
+        // API-Server-JSON war. Eine dekodierte Statusantwort ist das Dashboard.
+        guard case .dashboard(let state, let listenerBase, _, _) =
+                HermesSurface.classify(v1ModelsStatus: nil, dashboard: dashboard)
+        else {
+            return nil
+        }
+        // `{}` dekodiert erfolgreich, sagt aber nichts über das Dashboard aus.
+        // Ohne mindestens ein bekanntes Feld bleibt die erste Meldung stehen.
+        guard dashboard.gatewayPlatforms != nil || dashboard.gatewayRunning != nil else {
+            return nil
+        }
+        return Self.dashboardMessage(state: state, listenerBase: listenerBase)
+    }
+
+    /// Formuliert die Diagnose für eine erreichte Dashboard-Oberfläche.
+    ///
+    /// Zweck: nennt Zustand und gemeldete `listener_base` des API-Servers und
+    /// daraus den nächsten Schritt — gemeinsame HTTPS-Adresse über hermes-front,
+    /// HTTPS-Terminierung bei Bindungsadresse oder direktes Eintragen einer
+    /// konkreten Adresse.
+    /// Grenze: reine Textbildung aus dem Status; `0.0.0.0` und `http://` werden
+    /// nie als Basis-URL angeboten, weil die App sie nicht verbinden kann
+    /// (MARAAA-98). Ein fehlender Zustand wird nicht als „nicht verbunden“
+    /// behauptet.
+    private static func dashboardMessage(state: String?, listenerBase: String?) -> String {
+        let trimmedState = state?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedState = trimmedState.lowercased()
+        guard !normalizedState.isEmpty else {
+            return "Das Hermes-Dashboard antwortet, meldet aber keinen Zustand des API-Servers. Prüfe, ob die api_server-Plattform aktiv ist."
+        }
+        guard normalizedState == "connected" else {
+            return "Das Hermes-Dashboard antwortet, aber der API-Server ist nicht verbunden (state: \(trimmedState)). Starte ihn und prüfe API_SERVER_HOST und API_SERVER_KEY."
+        }
+        guard let listenerBase = listenerBase?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !listenerBase.isEmpty
+        else {
+            return "Das ist das Hermes-Dashboard. Der Status meldet keine Adresse des API-Servers. Prüfe API_SERVER_HOST und API_SERVER_PORT."
+        }
+        switch HermesSurface.listenerScope(listenerBase) {
+        case .loopback:
+            return "Das ist das Hermes-Dashboard. Der API-Server läuft laut Status auf \(listenerBase) und ist nur auf dem Server selbst erreichbar. Die App braucht eine gemeinsame HTTPS-Adresse (hermes-front hinter dem Tunnel); Einzelheiten in docs/hermes-405-diagnose.md."
+        case .allInterfaces:
+            return "Das ist das Hermes-Dashboard. Der API-Server lauscht laut Status auf allen Interfaces (\(listenerBase)). Die App braucht davor eine HTTPS-Adresse (Reverse Proxy oder Tunnel) und den API-Schlüssel."
+        case .other:
+            return "Das ist das Hermes-Dashboard. Der API-Server läuft laut Status auf \(listenerBase). Die App braucht diese Adresse als HTTPS-Basis-URL — bei http:// zuerst TLS-Terminierung einrichten — und den API-Schlüssel."
         }
     }
 
@@ -349,6 +492,31 @@ struct ServiceSettingsSection: View {
     private static func isJSON(_ data: Data) -> Bool {
         guard !data.isEmpty else { return false }
         return (try? JSONSerialization.jsonObject(with: data)) != nil
+    }
+
+    /// Prüft, ob der Body nach dem Hermes-API-Server aussieht.
+    ///
+    /// Zweck: Das Dashboard beantwortet `/v1/models` mit 200 und HTML
+    /// (SPA-Catch-all). Nur ein JSON-Objekt mit `object` oder `data` beweist
+    /// den API-Server; alles andere führt zur `/api/status`-Diagnose.
+    /// Grenze: keine Schema-Validierung über die beiden Top-Level-Schlüssel
+    /// hinaus.
+    private static func isHermesAPIServerPayload(_ data: Data) -> Bool {
+        guard let raw = try? JSONSerialization.jsonObject(with: data),
+              let object = raw as? [String: Any]
+        else {
+            return false
+        }
+        return object["object"] != nil || object["data"] != nil
+    }
+
+    /// Erkennt die 401-Antwort des Hermes-API-Servers (`gateway_auth_failed`).
+    ///
+    /// Grenze: liest nur den Fehlercode; die Meldung bleibt unabhängig vom
+    /// Servertext stabil.
+    private static func isGatewayAuthFailure(_ data: Data) -> Bool {
+        guard let text = String(data: data, encoding: .utf8) else { return false }
+        return text.contains("gateway_auth_failed")
     }
 
     /// Cloudflare Access liefert nach dem Redirect eine HTML-Anmeldeseite.
