@@ -45,6 +45,10 @@ final class ChatViewModel: ObservableObject {
         /// `nil` heißt: kein Denken geliefert (A3) — keine Zeile, kein Platzhalter.
         var reasoning: String?
         var reasoningDisclosure: Disclosure = .collapsed
+        /// `true`, sobald die Klappe für diesen Eintrag automatisch geöffnet
+        /// wurde (Rev 6 O4). Danach öffnet/schließt die Automatik diesen
+        /// Eintrag nie wieder.
+        var reasoningAutoExpanded: Bool = false
         var engine: ChatEngine?
 
         // Werkzeug
@@ -80,13 +84,15 @@ final class ChatViewModel: ObservableObject {
             toolStatus: ToolCallStatus? = nil,
             toolDetailDisclosure: Disclosure = .collapsed,
             approval: ChatApproval? = nil,
-            approvalResolved: Bool = false
+            approvalResolved: Bool = false,
+            reasoningAutoExpanded: Bool = false
         ) {
             self.id = id
             self.kind = kind
             self.text = text
             self.reasoning = reasoning
             self.reasoningDisclosure = reasoningDisclosure
+            self.reasoningAutoExpanded = reasoningAutoExpanded
             self.engine = engine
             self.toolCallID = toolCallID
             self.toolName = toolName
@@ -116,6 +122,11 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var loadedAllSessions = false
     /// Der Freigabe-Eintrag, dessen POST gerade läuft (Chips sind dann inaktiv).
     @Published private(set) var decidingApprovalEntryID: UUID?
+    /// Startzeit des laufenden Turns; `nil` = keine Arbeits-Animation.
+    @Published private(set) var turnStartedAt: Date?
+    /// Ein Timeout mitten im Strom lässt den Teiltext stehen und bietet den
+    /// Weg über den Verlauf an (Rev 6 O3).
+    @Published private(set) var offersHistoryReload = false
 
     /// Die Sprachschicht (V3, §9.6). `ChatView` setzt sie nach dem Erzeugen des
     /// Modells — ein `@StateObject` erlaubt keinen Environment-Zugriff im
@@ -125,9 +136,14 @@ final class ChatViewModel: ObservableObject {
     /// unverändert.
     var voice: (any VoiceAssistant)?
 
-    private let api: HermesChatAPI
-    private let provider: any ChatStreamProvider
-    private let configuration: HermesChatConfiguration
+    private let preferences: ChatPreferences
+    private let apiFactory: (HermesChatConfiguration) -> HermesChatAPI
+    private let providerFactory: (HermesChatConfiguration) -> any ChatStreamProvider
+    private var api: HermesChatAPI
+    private var provider: any ChatStreamProvider
+    /// Wird ausschließlich aus `preferences.configuration` gesetzt; ein neuer
+    /// Nutzerwert gilt ab dem nächsten Turn (Rev 6 §3.2.3).
+    private var configuration: HermesChatConfiguration
 
     private var streamTask: Task<Void, Never>?
     /// Höchste bereits dargestellte Nachrichten-ID; `0` ist die Baseline einer
@@ -154,12 +170,32 @@ final class ChatViewModel: ObservableObject {
     private var didWarnReasoningTruncated = false
 
     init(
-        api: HermesChatAPI = HermesChatAPI(),
-        provider: any ChatStreamProvider = HermesChatStreamProvider()
+        preferences: ChatPreferences = .shared,
+        apiFactory: @escaping (HermesChatConfiguration) -> HermesChatAPI = {
+            HermesChatAPI(configuration: $0)
+        },
+        providerFactory: @escaping (HermesChatConfiguration) -> any ChatStreamProvider = {
+            HermesChatStreamProvider(configuration: $0)
+        }
     ) {
-        self.api = api
-        self.provider = provider
-        self.configuration = HermesChatConfiguration()
+        self.preferences = preferences
+        self.apiFactory = apiFactory
+        self.providerFactory = providerFactory
+        self.configuration = preferences.configuration
+        self.api = apiFactory(self.configuration)
+        self.provider = providerFactory(self.configuration)
+    }
+
+    // MARK: Konfiguration
+
+    /// Baut API und Provider neu, wenn ein Nutzerwert sich geändert hat. Ein
+    /// laufender Strom wird nicht angefasst (Rev 6 §3.2.3).
+    private func refreshConfiguration() {
+        let wanted = preferences.configuration
+        guard wanted != configuration else { return }
+        configuration = wanted
+        api = apiFactory(wanted)
+        provider = providerFactory(wanted)
     }
 
     // MARK: Abgeleiteter Zustand
@@ -173,11 +209,42 @@ final class ChatViewModel: ObservableObject {
             && (currentSession == nil || historyLoaded)
     }
 
+    // MARK: Arbeitsanzeige
+
+    /// `true`, solange der Turn läuft und noch kein Antworttext dieses Turns
+    /// vorliegt — oder eine Werkzeugkarte gerade ausgeführt wird (Rev 6 O5).
+    var showsWorkingIndicator: Bool {
+        guard isStreaming else { return false }
+        if entries.contains(where: { $0.kind == .tool && $0.toolStatus == .running }) {
+            return true
+        }
+        guard let lastAgent = entries.last(where: {
+            $0.kind == .agent && turnEntryIDs.contains($0.id)
+        }) else {
+            return true
+        }
+        return lastAgent.text.isEmpty
+    }
+
+    // MARK: Verlauf neu laden
+
+    /// Anschluss nach einem Strom-Timeout: lädt den serverseitig
+    /// persistierten Turn neu, statt einen zweiten Strom zu öffnen (O3).
+    func reloadHistory() async {
+        offersHistoryReload = false
+        if let session = currentSession {
+            await openSession(session)
+        } else {
+            await loadSessions()
+        }
+    }
+
     // MARK: Verlauf
 
     /// Lädt die erste Seite der Sitzungsliste. Der Server liefert alle Quellen;
     /// die App blendet ausschließlich interne Quellen aus (MARAAA-155).
     func loadSessions() async {
+        refreshConfiguration()
         guard !isLoadingSessions else { return }
         isLoadingSessions = true
         defer { isLoadingSessions = false }
@@ -205,6 +272,7 @@ final class ChatViewModel: ObservableObject {
     /// Nächste Seite. Abgebrochen wird erst bei einer **leeren** Seite, nicht
     /// bei `has_more` (bei Pins unzuverlässig).
     func loadMoreSessions() async {
+        refreshConfiguration()
         guard !isLoadingSessions, !loadedAllSessions else { return }
         isLoadingSessions = true
         defer { isLoadingSessions = false }
@@ -228,6 +296,7 @@ final class ChatViewModel: ObservableObject {
 
     /// Öffnet eine Unterhaltung und lädt die neuesten Nachrichten.
     func openSession(_ summary: SessionSummary) async {
+        refreshConfiguration()
         guard !isStreaming, !isLoadingHistory else { return }
         isLoadingHistory = true
         notice = nil
@@ -275,6 +344,7 @@ final class ChatViewModel: ObservableObject {
     /// Ältere Nachrichten voranstellen. Der Anker für die Scrollposition ist
     /// die stabile `Entry.id` des bisher ersten Eintrags.
     func loadOlderMessages() async {
+        refreshConfiguration()
         guard let session = currentSession,
               !isLoadingHistory,
               !isStreaming,
@@ -333,6 +403,7 @@ final class ChatViewModel: ObservableObject {
     /// werden ignoriert; zu lange Eingaben werden mit Hinweis abgelehnt, nicht
     /// abgeschnitten.
     func send() {
+        refreshConfiguration()
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isStreaming, !isLoadingHistory else { return }
         guard text.count <= configuration.maxDraftCharacters else {
@@ -366,6 +437,8 @@ final class ChatViewModel: ObservableObject {
         didWarnReasoningTruncated = false
 
         isStreaming = true
+        turnStartedAt = Date()
+        offersHistoryReload = false
         streamTask = Task { await run(text: text) }
     }
 
@@ -375,6 +448,8 @@ final class ChatViewModel: ObservableObject {
         voice?.stopSpeaking()
         streamTask?.cancel()
         streamTask = nil
+        turnStartedAt = nil
+        offersHistoryReload = false
         notice = "Antwort abgebrochen."
         statusNote = nil
     }
@@ -401,9 +476,18 @@ final class ChatViewModel: ObservableObject {
 
     func dismissNotice() {
         notice = nil
+        offersHistoryReload = false
     }
 
     // MARK: Disclosure
+
+    /// Öffnet die Denk-Klappe genau einmal je Eintrag, solange noch kein
+    /// Antworttext da ist. Danach entscheidet nur noch der Nutzer (Rev 6 O4).
+    private func autoExpandReasoning(at index: Int) {
+        guard !entries[index].reasoningAutoExpanded, entries[index].text.isEmpty else { return }
+        entries[index].reasoningAutoExpanded = true
+        entries[index].reasoningDisclosure = .expanded
+    }
 
     /// Toggelt **nur** diesen Eintrag; andere behalten ihren Zustand.
     func toggleReasoning(_ entryID: UUID) {
@@ -424,6 +508,7 @@ final class ChatViewModel: ObservableObject {
     /// Beantwortet eine Server-Freigabe. Fail closed: eine nicht angebotene
     /// Choice wird nie gesendet.
     func decideApproval(_ entryID: UUID, choice: ChatApprovalChoice) async {
+        refreshConfiguration()
         guard decidingApprovalEntryID == nil,
               let index = entries.firstIndex(where: { $0.id == entryID }),
               entries[index].kind == .approval,
@@ -471,8 +556,12 @@ final class ChatViewModel: ObservableObject {
             isStreaming = false
             statusNote = nil
             createdSessionThisTurn = false
+            turnStartedAt = nil
         }
         do {
+            // O7: erst prüfen, ob der Server das Profil ausliefert — ein 404
+            // blockiert den Turn mit einer ehrlichen Meldung (F-R6-4).
+            try await api.probeProfile()
             let sessionID = try await prepareSession()
             try await streamTurn(sessionID: sessionID, text: text)
         } catch {
@@ -578,6 +667,7 @@ final class ChatViewModel: ObservableObject {
             case .reasoningDelta(let delta):
                 let id = ensureAgentEntry(&agentEntryID, engine: pendingEngine)
                 guard let index = index(of: id) else { break }
+                autoExpandReasoning(at: index)
                 let combined = (entries[index].reasoning ?? "") + delta
                 entries[index].reasoning = boundedText(
                     combined,
@@ -1010,6 +1100,18 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        // F-R6-1: Ein Timeout mitten im Strom ist kein stiller Erfolg. Der
+        // Teiltext bleibt stehen, kein Rollback, kein Merge; die Meldung nennt
+        // die eingestellte Schwelle und den Anschluss über den Verlauf (O3).
+        if streamStarted, isTimeout(error) {
+            offersHistoryReload = true
+            notice = boundedText(
+                "Seit \(Int(configuration.streamIdleTimeout)) s keine Antwort. Der Turn kann auf dem Server weiterlaufen — „Verlauf neu laden“ holt ihn.",
+                limit: configuration.maxNoticeCharacters
+            )
+            return
+        }
+
         if !streamStarted {
             rollbackUserEntry(text: text)
         }
@@ -1101,6 +1203,17 @@ final class ChatViewModel: ObservableObject {
         if error is CancellationError { return true }
         if let apiError = error as? APIError, apiError == .cancelled { return true }
         if let streamError = error as? ChatStreamError, streamError == .cancelled { return true }
+        return false
+    }
+
+    /// Ein Timeout kann als `APIError.timeout`, als `ChatStreamError.http(.timeout)`
+    /// oder als roher `URLError.timedOut` aus dem Strom kommen (F6/F-R6-1).
+    private func isTimeout(_ error: Error) -> Bool {
+        if let apiError = error as? APIError, apiError == .timeout { return true }
+        if let streamError = error as? ChatStreamError, streamError == .http(.timeout) {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .timedOut { return true }
         return false
     }
 

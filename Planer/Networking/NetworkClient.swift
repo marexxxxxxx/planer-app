@@ -72,6 +72,9 @@ struct StreamingResponse {
 /// Grenze: keine Fachlogik und kein Cache.
 struct NetworkClient {
     private let session: URLSession
+    /// Session für den Hermes-Strom. Ihre Anfragegrenze folgt `timeout`, damit
+    /// ein langer Turn nicht am 10-s-Deckel der REST-Session stirbt (Rev 6 O2).
+    private let streamingSession: URLSession
     private let retryPolicy: RetryPolicy
     /// Request-Timeout in Sekunden (spec-ios §10: 10 s, konfiguriert).
     private let timeout: TimeInterval
@@ -81,16 +84,23 @@ struct NetworkClient {
     /// HTTP-Status, die als Weiterleitung gelten (MARAAA-154).
     private static let redirectStatusCodes: Set<Int> = [301, 302, 303, 307, 308]
 
+    /// Kurzer Deckel für REST und Verbindungstest; die einzige Zahl, aus der
+    /// die 10-s-Session entsteht.
+    static let defaultTimeout: TimeInterval = 10
+
     init(
         session: URLSession = NetworkClient.cookieFreeSession,
         retryPolicy: RetryPolicy = .default,
-        timeout: TimeInterval = 10,
+        timeout: TimeInterval = NetworkClient.defaultTimeout,
         keychain: KeychainManager = KeychainManager()
     ) {
         self.session = session
         self.retryPolicy = retryPolicy
         self.timeout = timeout
         self.keychain = keychain
+        self.streamingSession = timeout == NetworkClient.defaultTimeout
+            ? NetworkClient.redirectBlockingSession
+            : NetworkClient.makeRedirectBlockingSession(timeout: timeout)
     }
 
     /// Führt den Request aus und liefert die Rohdaten (auch leer bei `204`).
@@ -176,7 +186,11 @@ struct NetworkClient {
         didRelogin: Bool
     ) async throws -> StreamingResponse {
         do {
-            let (bytes, response) = try await urlSession(for: service).bytes(for: urlRequest)
+            // Rev 6 O2: Der Hermes-Strom läuft über die Session, deren
+            // Anfragegrenze aus dem Stream-Timeout folgt. REST und
+            // Verbindungstest behalten die kurze Session.
+            let session = service == .hermes ? streamingSession : urlSession(for: service)
+            let (bytes, response) = try await session.bytes(for: urlRequest)
             guard let http = response as? HTTPURLResponse else {
                 throw APIError.invalidResponse
             }
@@ -729,10 +743,16 @@ extension NetworkClient {
     ///
     /// Hermes nutzt sie für `send`, `sendRaw`, `stream` und den Login; die
     /// übrigen Dienste behalten ihre Session. `connectionTest` nutzt sie für
-    /// alle Dienste.
-    private static let redirectBlockingSession: URLSession = {
+    /// alle Dienste. Der Chat-Strom bekommt eine eigene Session mit seinem
+    /// Stream-Timeout (Rev 6 O2).
+    private static let redirectBlockingSession: URLSession =
+        makeRedirectBlockingSession(timeout: defaultTimeout)
+
+    /// Baut eine redirect-blockierende Session mit der übergebenen
+    /// Anfragegrenze. Einzige Stelle, die `timeoutIntervalForRequest` setzt.
+    private static func makeRedirectBlockingSession(timeout: TimeInterval) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForRequest = timeout
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
         return URLSession(
@@ -740,7 +760,7 @@ extension NetworkClient {
             delegate: RedirectBlocker(),
             delegateQueue: nil
         )
-    }()
+    }
 }
 
 /// Verwirft Weiterleitungen, damit der 302 mit seinem `Location`-Header

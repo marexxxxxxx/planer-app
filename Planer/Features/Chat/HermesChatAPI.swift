@@ -112,6 +112,32 @@ struct HermesChatAPI: Sendable {
         _ = try await writer.send(request, for: .hermes)
     }
 
+    // MARK: Profil-Vorprüfung
+
+    /// Prüft einmal je Turn, ob das gewählte Profil ausgeliefert wird (O7).
+    ///
+    /// - `profile == ""` → sofort zurück, kein Request.
+    /// - `404` auf `/p/<profil>/health` → `profileNotServed(profil)`.
+    /// - jeder andere Ausgang → kein Urteil über das Profil, kein Fehler.
+    /// Grenze: nur `404` blockiert; 401/403/5xx/Transport überlässt die
+    /// Entscheidung dem normalen Pfad (F-R6-5).
+    func probeProfile() async throws {
+        guard !configuration.profile.isEmpty else { return }
+        try await validateBaseURL()
+        let request = APIRequest(method: .get, path: configuration.healthPath)
+        let result: (data: Data, response: HTTPURLResponse)
+        do {
+            result = try await reader.sendRaw(request, for: .hermes)
+        } catch {
+            // Kein Urteil: ein Transport- oder Auth-Fehler sagt nichts über
+            // das Profil; der normale Pfad liefert seinen eigenen Fehler.
+            return
+        }
+        if result.response.statusCode == 404 {
+            throw HermesChatConfigurationError.profileNotServed(configuration.profile)
+        }
+    }
+
     // MARK: Basis-URL
 
     /// Einmal je Instanz: der Pfad der Basis-URL muss leer sein, sonst wird

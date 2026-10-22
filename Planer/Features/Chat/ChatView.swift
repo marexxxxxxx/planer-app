@@ -132,25 +132,38 @@ struct ChatView: View {
     }
 
     private func noticeBar(_ notice: String) -> some View {
-        HStack(alignment: .top, spacing: DesignTokens.Spacing.s) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(DesignTokens.Typography.footnote)
-                .foregroundStyle(DesignTokens.Palette.danger)
-
-            Text(notice)
-                .font(DesignTokens.Typography.footnote)
-                .foregroundStyle(DesignTokens.Palette.label)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer(minLength: DesignTokens.Spacing.xs)
-
-            Button {
-                viewModel.dismissNotice()
-            } label: {
-                Image(systemName: "xmark")
+        VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
+            HStack(alignment: .top, spacing: DesignTokens.Spacing.s) {
+                Image(systemName: "exclamationmark.triangle.fill")
                     .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.danger)
+
+                Text(notice)
+                    .font(DesignTokens.Typography.footnote)
+                    .foregroundStyle(DesignTokens.Palette.label)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: DesignTokens.Spacing.xs)
+
+                Button {
+                    viewModel.dismissNotice()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(DesignTokens.Typography.footnote)
+                }
+                .accessibilityLabel("Hinweis schließen")
             }
-            .accessibilityLabel("Hinweis schließen")
+
+            // O3: nach einem Strom-Timeout ist der Verlauf der Anschluss an den
+            // serverseitig weiterlaufenden Turn.
+            if viewModel.offersHistoryReload {
+                Button("Verlauf neu laden") {
+                    Task { await viewModel.reloadHistory() }
+                }
+                .font(DesignTokens.Typography.footnote)
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Verlauf neu laden")
+            }
         }
         .padding(DesignTokens.Spacing.m)
         .background(DesignTokens.Palette.secondaryBackground)
@@ -190,6 +203,10 @@ struct ChatView: View {
                     ForEach(viewModel.entries) { entry in
                         row(for: entry)
                             .id(entry.id)
+                    }
+
+                    if viewModel.showsWorkingIndicator, let startedAt = viewModel.turnStartedAt {
+                        WorkingIndicatorView(startedAt: startedAt)
                     }
 
                     Color.clear
