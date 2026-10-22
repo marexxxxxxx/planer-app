@@ -24,6 +24,9 @@ struct PlanerApp: App {
     /// `.environmentObject` an `AppRootView` und damit an Chat und To-Dos.
     @StateObject private var voiceCoordinator = VoiceCoordinator()
 
+    /// Die einzige Anwendung des Erscheinungsbilds (spec-chat Rev 6 O6).
+    @StateObject private var appearance = AppearancePreferences.shared
+
     private let modelContainer: ModelContainer
 
     init() {
@@ -46,6 +49,7 @@ struct PlanerApp: App {
                     AppRootView()
                 }
             }
+            .preferredColorScheme(appearance.colorScheme)
             .environmentObject(voiceCoordinator)
             .task {
                 await unlockIfNeeded()

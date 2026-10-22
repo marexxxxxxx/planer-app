@@ -240,7 +240,8 @@ private struct MealieContentView: View {
             .disabled(model.isAddingIngredients || row.slug == nil)
             .accessibilityLabel("Zutaten auf Einkaufsliste setzen")
         }
-        .padding(DesignTokens.Spacing.m)
+        .frame(minHeight: DesignTokens.Size.recipeRow)
+        .padding(DesignTokens.Spacing.l)
         .background(
             DesignTokens.Palette.secondaryBackground,
             in: RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)
@@ -267,7 +268,7 @@ private struct MealieContentView: View {
             )
         } else {
             placeholderImage
-                .frame(width: 48, height: 48)
+                .frame(width: DesignTokens.Size.thumbnail, height: DesignTokens.Size.thumbnail)
                 .background(DesignTokens.Palette.tertiaryBackground)
                 .clipShape(
                     RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)

@@ -2,7 +2,8 @@
 //  SettingsView.swift
 //  Planer
 //
-//  Tab 5 „Einstellungen“: vier Dienst-Sektionen plus „Allgemein & Sicherheit“.
+//  Tab 5 „Einstellungen“: vier Dienst-Sektionen, Chat, Darstellung,
+//  „Allgemein & Sicherheit“ und Sprache.
 //
 
 import SwiftUI
@@ -10,9 +11,13 @@ import SwiftUI
 /// Einstellungs-Tab der App.
 ///
 /// Zweck: einzige Oberfläche zum Hinterlegen von Basis-URL, CF-Access-Paar und
-/// dienstspezifischem Token; alle Werte landen über `KeychainManager` in der Keychain.
+/// dienstspezifischem Token (Keychain) sowie der unkritischen Nutzerwerte des
+/// Chats und des Erscheinungsbilds (`UserDefaults` über die Präferenz-Klassen).
 /// Grenze: keine Fachkonfiguration der Feature-Tabs und keine Synchronisation
 /// von Einstellungen zwischen Geräten.
+///
+/// Reihenfolge ist bindend (spec-chat Rev 6 §4.9): die vier Dienst-Sektionen
+/// zuerst, danach Chat, Darstellung, Sperre, Sprache.
 struct SettingsView: View {
     var body: some View {
         NavigationStack {
@@ -21,6 +26,8 @@ struct SettingsView: View {
                 ServiceSettingsSection(service: .dashboard)
                 ServiceSettingsSection(service: .grocy)
                 ServiceSettingsSection(service: .mealie)
+                ChatSettingsSection()
+                AppearanceSettingsSection()
                 AppLockSection()
                 VoiceSettingsSection()
             }

@@ -68,6 +68,13 @@
       "semantic": "systemRed",
       "light": "#FF3B30",
       "dark": "#FF453A"
+    },
+    "userBubbleLabel": {
+      "swift": "Palette.userBubbleLabel",
+      "semantic": "systemBackground",
+      "light": "#FFFFFF",
+      "dark": "#000000",
+      "note": "Textfarbe auf der Nutzerblase. Bewusst nicht fest weiß: gegen den Akzent hält sie so in beiden Schemata Kontrast (hell 4,6:1, dunkel 7,8:1); festes Weiß käme im Dunkel-Modus auf #6C9BFF nur auf 2,7:1."
     }
   },
   "spacing": {
@@ -80,6 +87,17 @@
   "radius": {
     "card": 16,
     "bubble": 18
+  },
+  "size": {
+    "settingsRow": 56,
+    "recipeRow": 76,
+    "thumbnail": 56,
+    "swift": {
+      "settingsRow": "DesignTokens.Size.settingsRow",
+      "recipeRow": "DesignTokens.Size.recipeRow",
+      "thumbnail": "DesignTokens.Size.thumbnail"
+    },
+    "note": "Mindesthöhen (minHeight), nicht feste Höhen: bei Dynamic Type XXXL muss die Zeile wachsen dürfen. Additive Erweiterung, meta.version bleibt 1."
   },
   "typography": {
     "headline": "headline",

@@ -60,6 +60,7 @@ struct SettingsRowView<Content: View>: View {
             }
         }
         .padding(.vertical, DesignTokens.Spacing.xs)
+        .frame(minHeight: DesignTokens.Size.settingsRow)
     }
 }
 

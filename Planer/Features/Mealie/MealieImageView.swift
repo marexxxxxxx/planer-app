@@ -82,7 +82,7 @@ struct MealieImageView: View {
 
     var body: some View {
         content
-            .frame(width: 48, height: 48)
+            .frame(width: DesignTokens.Size.thumbnail, height: DesignTokens.Size.thumbnail)
             .background(DesignTokens.Palette.tertiaryBackground)
             .clipShape(
                 RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)

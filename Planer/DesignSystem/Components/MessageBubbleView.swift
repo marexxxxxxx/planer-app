@@ -18,9 +18,10 @@ struct MessageBubbleView: View {
 
         var foreground: Color {
             switch self {
-            // Weiß auf dem Akzent ist in Light und Dark lesbar; der Akzent selbst
-            // wird nicht pro Modus angepasst.
-            case .user: .white
+            // Die Kontrastfarbe kommt aus den Tokens und folgt dem Schema —
+            // festes Weiß wäre im Dunkel-Modus auf dem hellen Akzent zu
+            // kontrastarm (spec-chat Rev 6 O6: beide Schemata lesbar).
+            case .user: DesignTokens.Palette.userBubbleLabel
             case .agent, .toolCall: DesignTokens.Palette.label
             }
         }
