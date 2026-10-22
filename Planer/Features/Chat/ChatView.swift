@@ -370,12 +370,14 @@ struct ChatView: View {
                     .accessibilityLabel("Befehl kopieren")
                 }
 
-                if let description = entry.approval?.description, !description.isEmpty {
-                    Text(description)
+                if !entry.text.isEmpty {
+                    // F4: die Klartext-Folge hat eine Quelle — der beim
+                    // Empfang gespeicherte `Entry.text` (§3.3.2, C5).
+                    Text(entry.text)
                         .font(DesignTokens.Typography.footnote)
                         .foregroundStyle(DesignTokens.Palette.secondaryLabel)
                         .fixedSize(horizontal: false, vertical: true)
-                        .copyableText(entry.approval?.description)
+                        .copyableText(entry.text)
                 } else {
                     Text("Keine Beschreibung vom Server. Der Befehl oben wird unverändert ausgeführt.")
                         .font(DesignTokens.Typography.footnote)

@@ -33,9 +33,57 @@ enum TextClipboard {
     }
 
     /// `nil`, `""` und reiner Leerraum sind nicht kopierbar (§3.2.3).
-    fileprivate static func isCopyable(_ text: String?) -> Bool {
+    private static func isCopyable(_ text: String?) -> Bool {
         guard let text else { return false }
         return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Kontextmenü plus VoiceOver-Aktion. Bei nicht kopierbarem Text bleibt die
+    /// View unverändert — kein Menü, keine Aktion.
+    ///
+    /// Der Typ liegt bewusst **im** `enum`: `isCopyable` ist `private` und
+    /// damit nur in dieser Deklaration (und ihren Datei-Erweiterungen)
+    /// sichtbar. `fileprivate` macht den Modifier für die `View`-Erweiterung
+    /// darunter erreichbar, ohne die Prüfung zu duplizieren.
+    fileprivate struct CopyableTextModifier: ViewModifier {
+
+        let text: String?
+
+        @ViewBuilder
+        func body(content: Content) -> some View {
+            if TextClipboard.isCopyable(text) {
+                content
+                    .contextMenu {
+                        Button("Kopieren") {
+                            TextClipboard.copy(text)
+                        }
+                    }
+                    .accessibilityAction(named: Text("Kopieren")) {
+                        TextClipboard.copy(text)
+                    }
+            } else {
+                content
+            }
+        }
+    }
+
+    /// Nur die VoiceOver-Aktion; das Long-Press-Menü kommt dort vom
+    /// `textSelection` des Systems.
+    fileprivate struct CopyableActionModifier: ViewModifier {
+
+        let text: String?
+
+        @ViewBuilder
+        func body(content: Content) -> some View {
+            if TextClipboard.isCopyable(text) {
+                content
+                    .accessibilityAction(named: Text("Kopieren")) {
+                        TextClipboard.copy(text)
+                    }
+            } else {
+                content
+            }
+        }
     }
 }
 
@@ -44,56 +92,13 @@ extension View {
     /// Kontextmenü **und** benannte VoiceOver-Aktion — für Flächen ohne
     /// Textauswahl (Blasen, Kurzfelder).
     func copyableText(_ text: String?) -> some View {
-        modifier(CopyableTextModifier(text: text))
+        modifier(TextClipboard.CopyableTextModifier(text: text))
     }
 
     /// Nur die benannte VoiceOver-Aktion — für Flächen, auf denen
     /// `textSelection` bereits ein Systemmenü liefert (Befehl, Argumente,
     /// Ergebnis).
     func copyableAction(_ text: String?) -> some View {
-        modifier(CopyableActionModifier(text: text))
-    }
-}
-
-/// Kontextmenü plus VoiceOver-Aktion. Bei nicht kopierbarem Text bleibt die
-/// View unverändert — kein Menü, keine Aktion.
-private struct CopyableTextModifier: ViewModifier {
-
-    let text: String?
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if TextClipboard.isCopyable(text) {
-            content
-                .contextMenu {
-                    Button("Kopieren") {
-                        TextClipboard.copy(text)
-                    }
-                }
-                .accessibilityAction(named: Text("Kopieren")) {
-                    TextClipboard.copy(text)
-                }
-        } else {
-            content
-        }
-    }
-}
-
-/// Nur die VoiceOver-Aktion; das Long-Press-Menü kommt dort vom
-/// `textSelection` des Systems.
-private struct CopyableActionModifier: ViewModifier {
-
-    let text: String?
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if TextClipboard.isCopyable(text) {
-            content
-                .accessibilityAction(named: Text("Kopieren")) {
-                    TextClipboard.copy(text)
-                }
-        } else {
-            content
-        }
+        modifier(TextClipboard.CopyableActionModifier(text: text))
     }
 }

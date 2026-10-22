@@ -177,7 +177,11 @@ final class ChatViewModel: ObservableObject {
     private var turnEntryIDs: Set<UUID> = []
     /// `true`, sobald der Strom tatsächlich ein Ereignis geliefert hat. Davor
     /// gilt ein Fehler als „nichts gesendet“ (§4.8/F10).
-    private var streamStarted = false
+    ///
+    /// F2: beobachtbar, damit der Wechsel „verbindet“ → „denkt“ die
+    /// Phasen-Zeile sofort neu rendert; die Ableitung in `turnPhase` bleibt
+    /// unverändert.
+    @Published private(set) var streamStarted = false
     /// E5: Verlauf wirklich geladen — auch eine leere Seite zählt. Privat; die
     /// View liest den Zustand ausschließlich über `canSend` (§9.3).
     private var historyLoaded = false
@@ -637,7 +641,11 @@ final class ChatViewModel: ObservableObject {
         guard isStreaming else { return }
         guard backgroundTask == .invalid else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "chat-turn") {
-            Task { @MainActor in
+            // F1: UIKit verlangt `endBackgroundTask(_:)` **vor** der Rückkehr
+            // des Handlers. Ein Task-Hop auf den Main-Actor würde die Freigabe
+            // erst nach der Rückkehr abarbeiten. Der Handler läuft auf dem
+            // Main-Thread, die Klasse ist `@MainActor` — also synchron hier.
+            MainActor.assumeIsolated {
                 self.endBackgroundTaskIfNeeded()
             }
         }
@@ -727,9 +735,12 @@ final class ChatViewModel: ObservableObject {
             guard let current = entries.firstIndex(where: { $0.id == entryID }) else { return }
             entries[current].approvalPhase = choice == .once ? .executed : .denied
             // A3: `once` lässt `toolStatus` auf `.running`, damit die folgende
-            // Werkzeugkarte übernimmt.
+            // Werkzeugkarte übernimmt. F4: nach erfolgreichem `deny` ist die
+            // Freigabe auch für die Karte beendet (Rev-5-Verhalten).
             if choice == .once {
                 entries[current].toolStatus = .running
+            } else {
+                entries[current].toolStatus = .denied
             }
         }
         catch {
