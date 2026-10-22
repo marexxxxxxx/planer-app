@@ -744,7 +744,7 @@ final class ChatViewModel: ObservableObject {
             }
         }
         catch {
-            if let current = index(of: entryID) {
+            if let current = entries.firstIndex(where: { $0.id == entryID }) {
                 if isConflict(error) {
                     // F14: der Server hat bereits entschieden; welche
                     // Entscheidung, sagt nur er — nicht der Client.
