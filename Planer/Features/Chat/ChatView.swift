@@ -275,6 +275,16 @@ struct ChatView: View {
                 if !entry.text.isEmpty {
                     MessageBubbleView(role: .agent, text: entry.text)
 
+                    // Rev 8 §3.3.5: die Dauer der Erzeugung steht direkt unter
+                    // der Antwort und nur dort. Der Text kommt fertig aus dem
+                    // Modell — die View formatiert nicht.
+                    if let duration = viewModel.durationText(for: entry) {
+                        Text(duration)
+                            .font(DesignTokens.Typography.footnote)
+                            .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                            .accessibilityLabel(Text(duration))
+                    }
+
                     // §7 (spec-voice): jede Antwort trägt ihre Herkunft.
                     if let engine = entry.engine {
                         Text(engine.title)

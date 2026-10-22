@@ -58,6 +58,16 @@ struct HermesChatConfiguration: Sendable, Equatable {
     /// sendet nach ihrem Ablauf nichts mehr — die Wahrheit bleibt der Server.
     var approvalTimeout: TimeInterval = 300
 
+    // MARK: Dauer der Antwort
+
+    /// Kürzeste angezeigte Erzeugungsdauer. Darunter erscheint keine Zeitzeile
+    /// (0 s ist keine Information). Nur die Anzeige — der Feldwert bleibt roh.
+    var minVisibleGenerationDuration: TimeInterval = 1
+    /// Obergrenze einer plausiblen Dauer (24 h). Ein größerer Wert deutet auf
+    /// eine geänderte Einheit (z. B. Millisekunden) und wird verworfen statt
+    /// angezeigt.
+    var maxVisibleGenerationDuration: TimeInterval = 86_400
+
     // MARK: Textgrenzen
 
     var maxDraftCharacters = 4_000

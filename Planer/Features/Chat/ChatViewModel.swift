@@ -62,6 +62,11 @@ final class ChatViewModel: ObservableObject {
         /// Eintrag nie wieder.
         var reasoningAutoExpanded: Bool = false
         var engine: ChatEngine?
+        /// Dauer der Erzeugung in Sekunden (roh, ungerundet). `nil` = unbekannt.
+        ///
+        /// Quelle ist der Server-Zeitstempel (`generationDurations`) oder, nur
+        /// für den laufenden Turn, die lokale Messung (Rev 8 §3.3.2).
+        var generationDuration: TimeInterval?
 
         // Werkzeug
         var toolCallID: String?
@@ -101,6 +106,7 @@ final class ChatViewModel: ObservableObject {
             reasoning: String? = nil,
             reasoningDisclosure: Disclosure = .collapsed,
             engine: ChatEngine? = nil,
+            generationDuration: TimeInterval? = nil,
             toolCallID: String? = nil,
             toolName: String? = nil,
             toolEmoji: String? = nil,
@@ -118,6 +124,7 @@ final class ChatViewModel: ObservableObject {
             self.reasoningDisclosure = reasoningDisclosure
             self.reasoningAutoExpanded = reasoningAutoExpanded
             self.engine = engine
+            self.generationDuration = generationDuration
             self.toolCallID = toolCallID
             self.toolName = toolName
             self.toolEmoji = toolEmoji
@@ -175,6 +182,12 @@ final class ChatViewModel: ObservableObject {
     private var optimisticUserEntryID: UUID?
     /// Während des Stroms angelegte Agent-/Werkzeug-/Freigabe-Einträge.
     private var turnEntryIDs: Set<UUID> = []
+    /// R1: `true`, sobald der Antwortstrom angefordert wurde. Steuert keine
+    /// sichtbare Affordance und ist deshalb nicht `@Published` (Rev 8 §3.2.1).
+    private var streamRequested = false
+    /// R2, Rang 2: die lokale Messung des laufenden Turns für den Merge.
+    /// `nil` außerhalb eines Turns (Rev 8 §4.5).
+    private var mergeFallbackDuration: TimeInterval?
     /// `true`, sobald der Strom tatsächlich ein Ereignis geliefert hat. Davor
     /// gilt ein Fehler als „nichts gesendet“ (§4.8/F10).
     ///
@@ -312,6 +325,14 @@ final class ChatViewModel: ObservableObject {
     }
 
     // MARK: Verlauf neu laden
+
+    /// Setzt das Angebot „Verlauf neu laden“ — derselbe Zustand für den
+    /// Strom-Timeout (O3) und die gescheiterte Turn-Rettung (Rev 8 §4.3).
+    ///
+    /// Grenze: ein Setter; die View liest `offersHistoryReload` nur.
+    private func offerHistoryReload() {
+        offersHistoryReload = true
+    }
 
     /// Anschluss nach einem Strom-Timeout: lädt den serverseitig
     /// persistierten Turn neu, statt einen zweiten Strom zu öffnen (O3).
@@ -520,6 +541,8 @@ final class ChatViewModel: ObservableObject {
         optimisticUserEntryID = entry.id
         turnEntryIDs = []
         streamStarted = false
+        streamRequested = false
+        mergeFallbackDuration = nil
         createdSessionThisTurn = false
         receivedSessionHeader = false
         turnHistoryWasEmpty = watermark == nil || watermark == 0
@@ -779,8 +802,44 @@ final class ChatViewModel: ObservableObject {
             let sessionID = try await prepareSession()
             try await streamTurn(sessionID: sessionID, text: text)
         } catch {
+            // R1 (Rev 8 §4.4): Ein leerer Strom nach vollständig gelesener
+            // Antwort ist kein „nichts gesendet“. Vor der F8-Meldung steht
+            // genau ein Nachladeversuch über den vorhandenen Verlaufsweg.
+            if !(error is TurnFailure),
+               isEmptyStream(error),
+               streamRequested,
+               !Task.isCancelled,
+               currentSession != nil {
+                await rescueEmptyTurn()
+                return
+            }
             handle(error, text: text)
         }
+    }
+
+    // MARK: Turn-Rettung (Rev 8 §4.3)
+
+    /// R1: genau **ein** Nachladeversuch über den vorhandenen Verlaufsweg.
+    ///
+    /// `true` = ein neuer Assistenten-Eintrag wurde gefunden. Grenze: kein
+    /// zweiter Antwortstrom, kein `reloadHistory`/`openSession`, keine
+    /// Wiederholung; `merge` ist derselbe Weg wie der normale Abschluss und
+    /// behält die Live-Werkzeugkarten (Rev 8 §3.2.3, §4.3).
+    @discardableResult
+    private func rescueEmptyTurn() async -> Bool {
+        guard let session = currentSession, !Task.isCancelled else { return false }
+
+        mergeFallbackDuration = measuredTurnDuration()
+        let outcome = await merge(sessionID: session.id)
+        if case .merged(let agentEntries) = outcome, agentEntries > 0 {
+            return true
+        }
+
+        // Rettung erfolglos: die sichtbare Tatsache ist „keine Antwort“, und
+        // der vorhandene Knopf bietet den manuellen Weg an (Rev 8 §6.1/§6.2).
+        notice = displayText(for: ChatStreamError.emptyResponse)
+        offerHistoryReload()
+        return false
     }
 
     /// Stellt sicher, dass eine Sitzung existiert, die im Verlauf sichtbar ist.
@@ -861,6 +920,9 @@ final class ChatViewModel: ObservableObject {
         var effectiveSessionID = sessionID
         defer { voice?.finishAssistantStream() }
 
+        // R1: ab hier hat der Server die Anfrage erhalten; nur dann darf ein
+        // Nachladen des Verlaufs erwogen werden (Rev 8 §3.2.1).
+        streamRequested = true
         for try await event in provider.stream(sessionID: sessionID, userText: text) {
             // H2: erst ein tatsächlich empfangenes Ereignis beweist, dass der
             // Strom läuft. Ein Fehler davor rollt den Entwurf zurück (§4.8).
@@ -922,8 +984,26 @@ final class ChatViewModel: ObservableObject {
             notice = "Der Verlauf wird nicht fortgesetzt (Sitzungs-Header fehlt)."
         }
 
+        // R2: die lokale Messung festhalten, **bevor** der Merge die
+        // Live-Einträge ersetzt. Sie ist der Notbeleg ohne Server-Zeitstempel
+        // und trägt den Live-Eintrag auch dann, wenn der Merge nichts Neues
+        // findet (Rev 8 §4.5).
+        let measured = measuredTurnDuration()
+        attachLiveDuration(measured)
+        mergeFallbackDuration = measured
+
         if didFinish {
-            await merge(sessionID: effectiveSessionID)
+            switch await merge(sessionID: effectiveSessionID) {
+            case .nothingNew:
+                // F12: eine bereits gesetzte Fehlermeldung hat Vorrang.
+                if notice == nil {
+                    notice = "Antwort nicht im Verlauf gespeichert."
+                }
+            case .failed:
+                notice = "Der Verlauf konnte nicht geladen werden."
+            case .skipped, .merged:
+                break
+            }
         }
     }
 
@@ -1034,12 +1114,33 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Merge nach einem Turn (§5.5)
 
-    private func merge(sessionID: String) async {
+    /// Ergebnis eines Verlaufs-Nachladens (Rev 8 §4.1).
+    ///
+    /// `merge` setzt selbst keine `notice` mehr — der Aufrufer entscheidet den
+    /// Text. Deshalb kann der Rettungspfad denselben Weg benutzen, ohne dessen
+    /// Meldungen zu erben.
+    private enum MergeOutcome: Equatable {
+        /// Der watermark-Riegel (§5.5 Rev 5) hat den Lauf verhindert.
+        case skipped
+        /// Der Verlaufs-GET hat geworfen.
+        case failed
+        /// Kein Eintrag über dem watermark.
+        case nothingNew
+        /// `agentEntries` = in diesem Lauf angelegte Agent-Einträge.
+        case merged(agentEntries: Int)
+    }
+
+    @discardableResult
+    private func merge(sessionID: String) async -> MergeOutcome {
         // E5/M4: Ein Merge mit `watermark == nil` ist nur für eine in genau
         // diesem Turn angelegte Session zulässig. Der Fall „openSession
         // fehlgeschlagen, dann gesendet“ ist durch `canSend` gesperrt; dieser
         // Riegel ist die zweite, billige Sicherung.
-        guard watermark != nil || createdSessionThisTurn else { return }
+        guard watermark != nil || createdSessionThisTurn else { return .skipped }
+
+        // R2, Rang 2: die lokale Messung des laufenden Turns. Der Aufrufer hat
+        // sie unmittelbar davor gesetzt (Rev 8 §4.5).
+        let fallbackDuration = mergeFallbackDuration
 
         do {
             let page = try await api.messages(
@@ -1048,17 +1149,14 @@ final class ChatViewModel: ObservableObject {
                 offset: 0,
                 order: .latest
             )
+            // R2, Rang 1: aus der **ganzen** Seite, weil die zugehörige
+            // User-Nachricht vor dem `watermark` liegen kann (Rev 8 §4.2).
+            let durations = Self.generationDurations(in: page.messages)
             let fresh = page.messages
                 .filter { $0.id > (watermark ?? -1) }
                 .sorted { $0.id < $1.id }
 
-            guard !fresh.isEmpty else {
-                // F12: eine bereits gesetzte Fehlermeldung hat Vorrang.
-                if notice == nil {
-                    notice = "Antwort nicht im Verlauf gespeichert."
-                }
-                return
-            }
+            guard !fresh.isEmpty else { return .nothingNew }
 
             let expandedToolIDs = Set(
                 entries.filter { $0.toolDetailDisclosure == .expanded }
@@ -1083,7 +1181,9 @@ final class ChatViewModel: ObservableObject {
                 case "user":
                     applyMergedUser(message, consumed: &consumedOptimisticUser)
                 case "assistant":
-                    applyMergedAssistant(message)
+                    if let index = applyMergedAssistant(message) {
+                        entries[index].generationDuration = durations[message.id] ?? fallbackDuration
+                    }
                 case "tool":
                     applyMergedTool(message)
                 default:
@@ -1110,10 +1210,13 @@ final class ChatViewModel: ObservableObject {
             turnEntryIDs = []
             createdSessionThisTurn = false
 
+            let agentEntries = entries[rebuiltStart...].filter { $0.kind == .agent }.count
+
             await loadSessions()
             syncCurrentSessionWithList()
+            return .merged(agentEntries: agentEntries)
         } catch {
-            notice = "Der Verlauf konnte nicht geladen werden."
+            return .failed
         }
     }
 
@@ -1131,8 +1234,16 @@ final class ChatViewModel: ObservableObject {
         entries.append(Entry(kind: .user, text: text))
     }
 
-    private func applyMergedAssistant(_ message: ChatMessage) {
+    /// Baut den Agent-Eintrag einer gespeicherten Assistenten-Nachricht und
+    /// gibt dessen Index zurück; `nil` = kein Agent-Eintrag erzeugt.
+    ///
+    /// Grenze: die Dauer setzt der Aufrufer (`merge`/`map`), weil sie aus der
+    /// ganzen Nachrichtenseite kommt und nicht aus dieser einen Nachricht
+    /// (Rev 8 §4.6). Werkzeugkarten erhalten nie eine Dauer.
+    @discardableResult
+    private func applyMergedAssistant(_ message: ChatMessage) -> Int? {
         let reasoningText = Self.reasoning(of: message, limit: configuration.maxReasoningCharacters)
+        var agentIndex: Int?
 
         if let content = message.content, !content.isEmpty {
             entries.append(
@@ -1143,11 +1254,13 @@ final class ChatViewModel: ObservableObject {
                     engine: .hermes
                 )
             )
+            agentIndex = entries.count - 1
         } else if message.toolCalls?.isEmpty ?? true,
                   let reasoningText, !reasoningText.isEmpty {
             entries.append(
                 Entry(kind: .agent, text: "", reasoning: reasoningText, engine: .hermes)
             )
+            agentIndex = entries.count - 1
         }
 
         for call in message.toolCalls ?? [] {
@@ -1179,6 +1292,8 @@ final class ChatViewModel: ObservableObject {
                 )
             )
         }
+
+        return agentIndex
     }
 
     private func applyMergedTool(_ message: ChatMessage) {
@@ -1244,6 +1359,9 @@ final class ChatViewModel: ObservableObject {
     /// Bildet geladene Nachrichten auf Einträge ab — ohne UI, damit testbar.
     static func map(messages: [ChatMessage], engine: ChatEngine = .hermes) -> [Entry] {
         let configuration = HermesChatConfiguration()
+        // R2, Rang 1: jede geladene Antwort trägt ihre Dauer aus den
+        // Server-Zeitstempeln; ohne Zeitstempel bleibt das Feld `nil`.
+        let durations = generationDurations(in: messages)
         var result: [Entry] = []
 
         for message in messages {
@@ -1268,13 +1386,20 @@ final class ChatViewModel: ObservableObject {
                             kind: .agent,
                             text: bounded(content, limit: configuration.maxTextCharacters),
                             reasoning: reasoningText,
-                            engine: engine
+                            engine: engine,
+                            generationDuration: durations[message.id]
                         )
                     )
                 } else if message.toolCalls?.isEmpty ?? true,
                           let reasoningText, !reasoningText.isEmpty {
                     result.append(
-                        Entry(kind: .agent, text: "", reasoning: reasoningText, engine: engine)
+                        Entry(
+                            kind: .agent,
+                            text: "",
+                            reasoning: reasoningText,
+                            engine: engine,
+                            generationDuration: durations[message.id]
+                        )
                     )
                 }
 
@@ -1336,6 +1461,100 @@ final class ChatViewModel: ObservableObject {
         return String(text.prefix(limit)) + "\n… (gekürzt)"
     }
 
+    // MARK: Dauer der Antwort (Rev 8)
+
+    /// R2, Rang 2: lokale Messung von Sende- bis Abschlusszeitpunkt.
+    ///
+    /// `nil` ohne laufenden Turn (`turnStartedAt`). Grenze: keine Schätzung —
+    /// ohne Startzeit gibt es keinen Wert (Rev 8 §3.3.2).
+    private func measuredTurnDuration() -> TimeInterval? {
+        guard let startedAt = turnStartedAt else { return nil }
+        return Date().timeIntervalSince(startedAt)
+    }
+
+    /// R2, Rang 2 am Live-Eintrag: setzt die lokale Messung an den letzten
+    /// Agent-Eintrag **dieses** Turns mit Text, sofern dort noch nichts steht.
+    ///
+    /// Grenze: nur Einträge dieses Turns (`turnEntryIDs`), nur Agent-Einträge,
+    /// nur mit Text und nur ohne vorhandenen Wert — Einträge früherer Turns und
+    /// aus dem Serververlauf bleiben unberührt (Rev 8 §4.5).
+    private func attachLiveDuration(_ duration: TimeInterval?) {
+        guard let duration else { return }
+        guard let index = entries.lastIndex(where: {
+            turnEntryIDs.contains($0.id)
+                && $0.kind == .agent
+                && !$0.text.isEmpty
+                && $0.generationDuration == nil
+        }) else { return }
+        entries[index].generationDuration = duration
+    }
+
+    /// R2, Rang 1: Assistenten-ID → Dauer aus den Server-Zeitstempeln.
+    ///
+    /// Dauer = Zeitstempel der Assistenten-Nachricht minus Zeitstempel der
+    /// letzten vorangehenden User-Nachricht derselben Liste. Grenze: reine
+    /// Funktion, kein Zustand, kein HTTP — die **einzige** Stelle, die
+    /// `ChatMessage.timestamp` interpretiert (Rev 8 §4.8).
+    static func generationDurations(in messages: [ChatMessage]) -> [Int: TimeInterval] {
+        let maximum = HermesChatConfiguration().maxVisibleGenerationDuration
+        var lastUser: Double?
+        var result: [Int: TimeInterval] = [:]
+
+        for message in messages.sorted(by: { $0.id < $1.id }) {
+            switch message.role {
+            case "user":
+                // Auch `nil` setzt zurück: ohne User-Zeitstempel gibt es keinen
+                // Bezugspunkt für die folgende Antwort.
+                lastUser = message.timestamp
+
+            case "assistant":
+                guard let timestamp = message.timestamp,
+                      let userTimestamp = lastUser,
+                      timestamp > userTimestamp
+                else { continue }
+                let duration = timestamp - userTimestamp
+                // R5: eine unplausible Einheit ist kein Datenpunkt.
+                if duration <= maximum {
+                    result[message.id] = duration
+                }
+
+            default:
+                continue
+            }
+        }
+        return result
+    }
+
+    /// R2, Anzeige: `nil` = keine Zeile (unbekannt oder unter der Mindestdauer).
+    ///
+    /// Grenze: reine Weiterleitung; die Schwelle kommt aus der Konfiguration,
+    /// die Formatierung aus `durationText(seconds:minimum:)`.
+    func durationText(for entry: Entry) -> String? {
+        guard let duration = entry.generationDuration else { return nil }
+        return Self.durationText(
+            seconds: duration,
+            minimum: configuration.minVisibleGenerationDuration
+        )
+    }
+
+    /// R2, reiner Formatierer (Rev 8 §3.3.3/§3.3.4). Kein `Entry`, keine View,
+    /// kein `Date`, keine `Locale` — die einzige Stelle, an der eine Dauer in
+    /// Text übergeht.
+    static func durationText(seconds: TimeInterval, minimum: TimeInterval) -> String? {
+        guard seconds.isFinite else { return nil }
+        // Abgerundet auf ganze Sekunden: 59.9 s darf nicht „1 min 0 s“ werden.
+        let total = Int(floor(seconds))
+        guard total >= 0, TimeInterval(total) >= minimum else { return nil }
+
+        if total < 60 {
+            return "\(total) s"
+        }
+        if total < 3_600 {
+            return "\(total / 60) min \(total % 60) s"
+        }
+        return "\(total / 3_600) h \((total % 3_600) / 60) min"
+    }
+
     // MARK: Fehler
 
     private func handle(_ error: Error, text: String) {
@@ -1365,7 +1584,7 @@ final class ChatViewModel: ObservableObject {
         // Teiltext bleibt stehen, kein Rollback, kein Merge; die Meldung nennt
         // die eingestellte Schwelle und den Anschluss über den Verlauf (O3).
         if streamStarted, isTimeout(error) {
-            offersHistoryReload = true
+            offerHistoryReload()
             notice = boundedText(
                 "Seit \(Int(configuration.streamIdleTimeout)) s keine Antwort. Der Turn kann auf dem Server weiterlaufen — „Verlauf neu laden“ holt ihn.",
                 limit: configuration.maxNoticeCharacters
@@ -1402,7 +1621,7 @@ final class ChatViewModel: ObservableObject {
                 message = streamError.errorDescription ?? "Stream-Fehler."
             }
         } else if let urlError = error as? URLError {
-            // M2: `URLSession.AsyncBytes` kann mitten im Strom werfen; daraus
+            // M2: der Strom-Client kann mitten im Strom werfen; daraus
             // darf nie „Unbekannter Fehler.“ werden.
             message = Self.describe(urlError)
         } else if let localized = (error as? LocalizedError)?.errorDescription {
@@ -1464,6 +1683,19 @@ final class ChatViewModel: ObservableObject {
         if error is CancellationError { return true }
         if let apiError = error as? APIError, apiError == .cancelled { return true }
         if let streamError = error as? ChatStreamError, streamError == .cancelled { return true }
+        return false
+    }
+
+    /// B2 (Rev 8 §3.2.1): ein leerer Strom nach **vollständig gelesener**
+    /// HTTP-Antwort. Beide Fehler entstehen erst danach — ein Transportfehler,
+    /// ein Abbruch oder ein Timeout ist ausdrücklich **kein** leerer Strom.
+    private func isEmptyStream(_ error: Error) -> Bool {
+        if let streamError = error as? ChatStreamError, streamError == .emptyResponse {
+            return true
+        }
+        if let apiError = error as? APIError, apiError == .emptyResponse {
+            return true
+        }
         return false
     }
 
