@@ -6,7 +6,7 @@
 # Geprüft werden Dateien, Symbole, Zeilenreihenfolgen und Zählungen — keine
 # Swift-Toolchain, keine Kompilierung, kein Aufruf anderer Tests.
 #
-#   bash Tests/verify_chat_ux.sh [timeouts|stream|thinking|working|appearance|profile|rows|all]
+#   bash Tests/verify_chat_ux.sh [timeouts|stream|thinking|working|appearance|profile|rows|handover|all]
 #
 # Exit-Status: 0 = alle Prüfungen des Abschnitts grün, 1 = mindestens eine rot,
 # 2 = falscher Aufruf. Der Status stammt aus `fail`, nie aus einem `echo`.
@@ -14,6 +14,12 @@
 # Die Prüfnummern (T/S/D/W/A/P/H) sind die der Testmatrix §7.3. Die dort
 # genannte Zeile M1–M17 aus §7.4 macht den zugehörigen Abschnitt rot; die
 # Mutationsmatrix steht im Bericht zu MARAAA-164.
+#
+# Abschnitt (h) ist die Regression zu R-CH1 (MARAAA-166): F1–F6 aus G-CH2.
+# Dort steht nicht mehr die Deklaration im Vordergrund, sondern die
+# Zustandsübertragung in `merge` — F1b–F1d prüfen die Reihenfolge der
+# Anweisungen im Rumpf, damit ein entferntes oder nur deklariertes
+# `carriedReasoningDisclosure` rot wird.
 #
 set -euo pipefail
 
@@ -52,6 +58,7 @@ bad()  { echo "FAIL: $1"; fail=1; }
 need() { if grep -qE "$2" "$1"; then pass "$3"; else bad "$3  [$1 ~ /$2/]"; fi; }
 need_fixed() { if grep -qF "$2" "$1"; then pass "$3"; else bad "$3  [$1 = $2]"; fi; }
 ban() { if grep -qE "$2" "$1"; then bad "$3  [$1 ~ /$2/]"; else pass "$3"; fi; }
+ban_ci() { if grep -qiE "$2" "$1"; then bad "$3  [$1 ~ /$2/ (i)]"; else pass "$3"; fi; }
 ban_fixed() { if grep -qF "$2" "$1"; then bad "$3  [$1 = $2]"; else pass "$3"; fi; }
 file_required() { if [[ -f "$1" ]]; then pass "Datei: $1"; else bad "Datei fehlt: $1"; fi; }
 
@@ -91,9 +98,16 @@ section() {
     awk -v s="$2" -v e="$3" '!f && index($0, s) > 0 { f=1 } f { print; if (index($0, e) > 0) exit }' "$1"
 }
 
+# Abschnitt erst in eine Variable, dann prüfen. `section ... | grep -q` ist
+# unter `pipefail` nicht deterministisch: beendet `grep -q` nach dem ersten
+# Treffer, bekommt `awk` beim nächsten Schreibblock SIGPIPE (Status 141) und
+# die Pipeline gilt als rot, obwohl der Treffer da war. Gemessen an der
+# merge-Sektion (6896 Byte, mehrere Schreibblöcke): 15 von 300 Läufen 141.
+# Die Zwischenvariable nimmt den SIGPIPE aus dem Spiel.
 section_has() {
-    local file="$1" start="$2" end="$3" pattern="$4" label="$5"
-    if section "$file" "$start" "$end" | grep -qE "$pattern"; then
+    local file="$1" start="$2" end="$3" pattern="$4" label="$5" body
+    body="$(section "$file" "$start" "$end")"
+    if grep -qE "$pattern" <<<"$body"; then
         pass "$label"
     else
         bad "$label  [$file, Abschnitt /$start/../$end/ ~ /$pattern/]"
@@ -101,8 +115,9 @@ section_has() {
 }
 
 section_lacks() {
-    local file="$1" start="$2" end="$3" pattern="$4" label="$5"
-    if section "$file" "$start" "$end" | grep -qE "$pattern"; then
+    local file="$1" start="$2" end="$3" pattern="$4" label="$5" body
+    body="$(section "$file" "$start" "$end")"
+    if grep -qE "$pattern" <<<"$body"; then
         bad "$label  [$file, Abschnitt /$start/../$end/ ~ /$pattern/]"
     else
         pass "$label"
@@ -116,6 +131,22 @@ ban_tree() {
         pass "$label"
     else
         bad "$label (Treffer: $hits)"
+    fi
+}
+
+# Reihenfolge zweier wörtlicher Marken **innerhalb** eines Abschnitts: grün
+# nur, wenn beide vorkommen und $5 nach $4 steht. Genau das unterscheidet
+# „Zustand vor dem Entfernen gemerkt“ von „irgendwo im Rumpf erwähnt“.
+section_order() {
+    local file="$1" start="$2" end="$3" first="$4" second="$5" label="$6" body
+    body="$(section "$file" "$start" "$end")"
+    if awk -v a="$first" -v b="$second" '
+        index($0, a) > 0 && !ia { ia = NR }
+        index($0, b) > 0 && !ib { ib = NR }
+        END { exit !(ia && ib && ib > ia) }' <<<"$body"; then
+        pass "$label"
+    else
+        bad "$label  [$file, Abschnitt /$start/../$end/: »$first« muss vor »$second« stehen]"
     fi
 }
 
@@ -550,6 +581,114 @@ rows_section() {
         "H11c Regression: der Loader bekommt die damalige Basis"
 }
 
+# ---------------------------------------------------------------------------
+# (h) Nachbesserung R-CH1 — F1 aus G-CH2 und die Nachbesserungen F3–F6
+# ---------------------------------------------------------------------------
+# F1 (hoch) war: `merge` entfernt den Live-Agent-Eintrag und baut ihn aus dem
+# Serververlauf neu auf — mit Default `.collapsed`. Die Klappe schloss damit
+# ohne Nutzeraktion. Der alte Prüfstand war grün, weil er nur die Deklaration
+# `var reasoningDisclosure: Disclosure = .collapsed` (D6) las.
+#
+# Deshalb prüft dieser Abschnitt nicht die Existenz von Namen, sondern die
+# Anweisungsfolge im Rumpf von `merge`: festhalten **vor** `entries.removeAll`,
+# übertragen **nach** dem Neuaufbau. Wer die Übertragung entfernt, verliert
+# F1a–F1d; wer sie nur deklariert, verliert F1c.
+#
+# F2 wird hier bewusst nicht als Fehler geprüft: N1.1 hat
+# `MessageBubbleView`/`userBubbleLabel` angenommen. Belegt bleibt allein X9/X10
+# (genau dieser eine Token existiert) — keine Aussage über einen Verstoß.
+# ---------------------------------------------------------------------------
+handover_section() {
+    echo "--- (h) Nachbesserung R-CH1: Denk-Klappe über den Merge, F3–F6"
+
+    local merge_start merge_end hold_start hold_end carry_start carry_end
+    merge_start='private func merge(sessionID: String) async'
+    merge_end='private func turnReasoningDisclosure'
+    hold_start='private func turnReasoningDisclosure()'
+    hold_end='private func carryReasoningDisclosure'
+    carry_start='private func carryReasoningDisclosure'
+    carry_end='private func syncCurrentSessionWithList'
+
+    # --- F1: Zustand des Turn-Agent-Eintrags überlebt den Merge (N1.3) ------
+    need_fixed "$vm" 'let carriedReasoningDisclosure = turnReasoningDisclosure()' \
+        "F1a merge hält den Klappenzustand in einer eigenen Größe fest"
+    section_order "$vm" "$merge_start" "$merge_end" \
+        'turnReasoningDisclosure()' 'entries.removeAll' \
+        "F1b festgehalten wird vor entries.removeAll"
+    section_has "$vm" "$merge_start" "$merge_end" \
+        'carryReasoningDisclosure\(carriedReasoningDisclosure, onto: rebuiltStart\)' \
+        "F1c der festgehaltene Zustand wird auf den Neuaufbau übertragen"
+    section_order "$vm" "$merge_start" "$merge_end" \
+        'entries.removeAll' 'carryReasoningDisclosure(carriedReasoningDisclosure' \
+        "F1d übertragen wird erst nach dem Entfernen"
+    section_order "$vm" "$merge_start" "$merge_end" \
+        'applyMergedAssistant(message)' 'carryReasoningDisclosure(carriedReasoningDisclosure' \
+        "F1e übertragen wird erst nach dem Neuaufbau des Agent-Eintrags"
+    section_has "$vm" "$hold_start" "$hold_end" \
+        'turnEntryIDs\.contains\(\$0\.id\) && \$0\.kind == \.agent && \$0\.reasoning != nil' \
+        "F1f festgehalten wird nur der Agent-Eintrag dieses Turns mit Denken"
+    section_has "$vm" "$hold_start" "$hold_end" '\?\.reasoningDisclosure' \
+        "F1g festgehalten wird genau der Auf-/Zu-Zustand der Klappe"
+    section_has "$vm" "$carry_start" "$carry_end" \
+        'guard let disclosure, start < entries\.count' \
+        "F1h ohne Live-Eintrag bleibt der Default (nil wird nicht übertragen)"
+    section_has "$vm" "$carry_start" "$carry_end" \
+        'entries\[index\]\.reasoningDisclosure = disclosure' \
+        "F1i die Übertragung schreibt den Zustand in den neuen Eintrag"
+    section_has "$vm" "$carry_start" "$carry_end" 'lastIndex\(where:' \
+        "F1j getroffen wird der Agent-Eintrag aus dem Serververlauf"
+    section_has "$vm" "$carry_start" "$carry_end" '\$0\.kind == \.agent && \$0\.reasoning != nil' \
+        "F1k übertragen wird nur auf einen Eintrag mit Denken"
+    # F1l prüft zwei Dinge zusammen, weil ein `section_lacks` auf einem leeren
+    # Abschnitt sonst grün wäre: die Zuweisung muss da sein **und** der
+    # Automatik-Merker darf nicht gesetzt werden.
+    local carry_body
+    carry_body="$(section "$vm" "$carry_start" "$carry_end")"
+    if grep -qE 'entries\[index\]\.reasoningDisclosure = disclosure' <<<"$carry_body" \
+       && ! grep -qE 'reasoningAutoExpanded' <<<"$carry_body"; then
+        pass "F1l die Übertragung setzt den Automatik-Merker nicht (Nutzerentscheidung bleibt)"
+    else
+        bad "F1l die Übertragung setzt den Automatik-Merker nicht (Nutzerentscheidung bleibt)  [$vm, Abschnitt /$carry_start/../$carry_end/: Zuweisung muss stehen, »reasoningAutoExpanded« nicht]"
+    fi
+
+    # --- F3: das Timeout-Angebot gehört nur zur Timeout-Meldung (N1.4) ------
+    section_has "$vm" 'func openSession(' 'func loadOlderMessages' \
+        'offersHistoryReload = false' \
+        "F3a openSession nimmt das Angebot des alten Turns zurück"
+    section_has "$vm" 'func newChat()' 'func send()' \
+        'offersHistoryReload = false' \
+        "F3b newChat nimmt das Angebot des alten Turns zurück"
+    exactly "$vm" 'offersHistoryReload = true' 1 \
+        "F3c nur die Timeout-Meldung bietet „Verlauf neu laden“ an"
+
+    # --- F4: kein Geheimniswort in ChatPreferences (T20 wörtlich) -----------
+    ban_ci "$pref" '(password|token|secret)' \
+        "F4  ChatPreferences nennt kein Geheimnis mehr (T20 wörtlich)"
+
+    # --- F5: kein toter Konfigurationszustand im Profilverzeichnis ---------
+    ban "$dir" '^[[:space:]]*(private|fileprivate|internal) let configuration' \
+        "F5a kein gespeicherter Konfigurationszustand im Profilverzeichnis"
+    local dir_cfg
+    dir_cfg="$(count_matches "$dir" 'configuration')"
+    if [[ "$dir_cfg" -eq 2 ]]; then
+        pass "F5b configuration lebt nur im init-Parameter (Zeilen: 2)"
+    else
+        bad "F5b configuration lebt nur im init-Parameter (Zeilen: $dir_cfg, erwartet: 2)  [$dir ~ /configuration/]"
+    fi
+
+    # --- F6: ein laufender Turn behält seine Konfiguration (N1.2) ----------
+    section_has "$vm" 'private func refreshConfiguration' 'let wanted' \
+        'guard !isStreaming else \{ return \}' \
+        "F6a während isStreaming wird nichts ersetzt"
+    section_order "$vm" 'private func refreshConfiguration' 'let wanted' \
+        'guard !isStreaming' 'let wanted' \
+        "F6b der Riegel steht vor dem Lesen der neuen Werte"
+    exactly "$vm" 'configuration = wanted' 1 \
+        "F6c genau ein Ersatzpfad für die Konfiguration"
+    section_has "$vm" 'func decideApproval(' 'switch choice' 'refreshConfiguration\(\)' \
+        "F6d der Freigabe-Pfad ruft den (nun abgeriegelten) Ersatz auf"
+}
+
 case "${1:-all}" in
     timeouts)   timeouts_section ;;
     stream)     stream_section ;;
@@ -558,6 +697,7 @@ case "${1:-all}" in
     appearance) appearance_section ;;
     profile)    profile_section ;;
     rows)       rows_section ;;
+    handover)   handover_section ;;
     all)
         timeouts_section
         stream_section
@@ -566,9 +706,10 @@ case "${1:-all}" in
         appearance_section
         profile_section
         rows_section
+        handover_section
         ;;
     *)
-        echo "Aufruf: $0 [timeouts|stream|thinking|working|appearance|profile|rows|all]"
+        echo "Aufruf: $0 [timeouts|stream|thinking|working|appearance|profile|rows|handover|all]"
         exit 2
         ;;
 esac
