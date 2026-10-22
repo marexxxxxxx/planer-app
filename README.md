@@ -95,8 +95,8 @@ ausschließlich in `NetworkClient.injectHeaders`. Mealie nutzt zusätzlich
 `Authorization: Bearer <api_token>`, Grocy `GROCY-API-KEY`, das Dashboard keinen
 Header.
 
-Hermes nutzt **keinen** Bearer mehr. Die App meldet sich mit dem
-Password-Login an:
+Hermes nutzt im Dashboard-Betrieb **keinen** Bearer. Die App meldet sich dort
+mit dem Password-Login an:
 
 ```
 POST /auth/password-login
@@ -117,6 +117,36 @@ In den Einstellungen stehen für Hermes `Benutzername` und `Passwort`
 (SecureField); beide werden über `KeychainManager` gespeichert, ein leeres
 Feld löscht den Eintrag. Mealie, Grocy und Dashboard behalten ihre bisherigen
 Token-Felder. Es gibt keine Secrets im Repo und keine `UserDefaults`-Ablage.
+
+### Hermes: Dashboard und API-Server sind zwei Oberflächen
+
+Hermes betreibt zwei getrennte Prozesse, die nicht dieselben Routen kennen:
+
+| Oberfläche | Authentifizierung | Endpunkte |
+| --- | --- | --- |
+| Dashboard (Port 9119) | Password-Login + Session-Cookies | `POST /auth/password-login`, `GET /api/sessions`, `GET /api/sessions/{id}`, `GET /api/sessions/{id}/messages` |
+| API-Server (Port 8642) | `Authorization: Bearer <API_SERVER_KEY>` | `POST /api/sessions`, `GET/PATCH/DELETE /api/sessions/{id}`, `GET …/messages`, `POST /v1/chat/completions`, `POST /v1/runs/{id}/approval`, `GET /v1/models` |
+
+Das Dashboard hat **kein** `POST /api/sessions` und keine `/v1/*`-Routen; ein
+POST dorthin endet mit `405 {"detail":"Method Not Allowed"}`. Der API-Server
+kennt umgekehrt kein `/auth/password-login` (404) und ignoriert Cookies — er
+akzeptiert ausschließlich den Bearer-Schlüssel. Zeigt die Basis-URL also auf
+das Dashboard, scheitert der Chat mit HTTP 405, obwohl der Password-Login
+selbst funktioniert.
+
+In den Einstellungen sind für den Chat-Betrieb deshalb einzutragen:
+
+- **Basis-URL**: Origin des API-Servers (Port 8642), ohne Pfad und ohne
+  abschließendes `/api`, z. B. `https://host:8642`.
+- **API-Schlüssel (API-Server, optional)**: der Wert von `API_SERVER_KEY`.
+
+Ist der Schlüssel gesetzt, sendet jeder Hermes-Request
+`Authorization: Bearer <key>` und keinen `Cookie`-Header; der Password-Login
+entfällt (er würde am API-Server mit 404 scheitern). Bleibt das Feld leer,
+gilt unverändert der oben beschriebene Password-Login gegen das Dashboard.
+Der Verbindungstest fragt für Hermes `GET /v1/models` ab und erkennt daran den
+API-Server; 405 und eine Weiterleitung auf `/login` werden als
+„Dashboard statt API-Server“ gemeldet.
 
 ## Statische Abnahme
 

@@ -48,6 +48,17 @@ struct ServiceConfiguration: Equatable, Sendable {
     /// Hermes: Klartext-Passwort des Password-Logins; nur im Speicher, nie im Log.
     let password: String?
 
+    /// `true`, wenn Hermes gegen den API-Server statt gegen das Dashboard läuft.
+    ///
+    /// Zweck: Ein hinterlegter API-Schlüssel (`.apiToken`) schaltet die
+    /// Betriebsart um — dann trägt jeder Request `Authorization: Bearer`, es
+    /// gibt keine Cookies und keinen Password-Login.
+    /// Grenze: nur ein Schalter für `NetworkClient`; er sagt nichts über die
+    /// Erreichbarkeit des API-Servers aus.
+    var hermesUsesAPIToken: Bool {
+        service == .hermes && apiToken != nil
+    }
+
     /// Liest die Konfiguration des Dienstes aus der Keychain (spec-ios §4).
     ///
     /// - Throws: `ServiceConfigurationError`, wenn die Basis-URL fehlt oder
@@ -83,10 +94,12 @@ struct ServiceConfiguration: Equatable, Sendable {
             username = nil
             password = nil
         case .hermes:
-            // MARAAA-146: Hermes akzeptiert keinen Bearer mehr; gelesen werden
-            // ausschließlich die Zugangsdaten des Password-Logins.
+            // MARAAA-146: Das Dashboard authentifiziert weiterhin über den
+            // Password-Login. Zusätzlich wird ein optionaler API-Schlüssel des
+            // Hermes-API-Servers gelesen; ist er gesetzt, läuft der Verkehr
+            // über Bearer statt über Cookies (siehe `hermesUsesAPIToken`).
             apiKey = nil
-            apiToken = nil
+            apiToken = normalized(try keychain.value(for: service, account: .apiToken))
             username = normalized(try keychain.value(for: service, account: .username))
             // Ein Passwort wird nicht getrimmt: Leerzeichen können Teil des
             // Geheimnisses sein. Ein leerer Wert gilt trotzdem als „nicht gesetzt“.

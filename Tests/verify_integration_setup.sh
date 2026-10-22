@@ -165,7 +165,11 @@ require "Dashboard fragt /tasks ab" \
     'path: "/tasks"' "$settings"
 require "Dashboard begrenzt auf eine Aufgabe" \
     'name: "limit", value: "1"' "$settings"
-require "Hermes fragt /api/sessions ab" \
+require "Hermes fragt /v1/models auf dem API-Server ab" \
+    'path: "/v1/models"' "$settings"
+# Der Chat läuft gegen den API-Server (Port 8642); `/v1/models` existiert nur
+# dort. Das Dashboard kennt diesen Pfad nicht und antwortet mit 405/302.
+forbid "Hermes fragt nicht mehr das Dashboard ab" \
     'path: "/api/sessions"' "$settings"
 
 require "Erfolg verlangt 2xx" \

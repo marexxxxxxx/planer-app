@@ -30,6 +30,9 @@ struct ServiceSettingsSection: View {
     /// Hermes-Anmeldung (MARAAA-146); Mealie/Grocy/Dashboard bleiben beim Token.
     @State private var hermesUsername = ""
     @State private var hermesPassword = ""
+    /// Optionaler Schlüssel des Hermes-API-Servers (Port 8642); gesetzt schaltet
+    /// er Hermes auf `Authorization: Bearer` statt Password-Login um.
+    @State private var hermesAPIToken = ""
     @State private var message: String?
     @State private var isTesting = false
 
@@ -55,12 +58,19 @@ struct ServiceSettingsSection: View {
             SecureField("CF-Access-Client-Secret", text: $cloudflareClientSecret)
 
             if service == .hermes {
-                // Hermes akzeptiert keinen API-Token mehr; die Sitzung entsteht
-                // aus dem Password-Login (MARAAA-146).
+                // Zwei Betriebsarten: Das Dashboard authentifiziert über den
+                // Password-Login (MARAAA-146); ein optional hinterlegter
+                // API-Schlüssel schaltet auf den API-Server und Bearer um.
                 TextField("Benutzername", text: $hermesUsername)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 SecureField("Passwort", text: $hermesPassword)
+                SecureField("API-Schlüssel (API-Server, optional)", text: $hermesAPIToken)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Text("Chat-Endpunkte liegen auf dem API-Server (Port 8642) und brauchen den API-Schlüssel. Mit Schlüssel entfällt der Password-Login; Benutzername/Passwort gelten nur für das Dashboard.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else if let credential = service.apiCredential {
                 SecureField(credential.displayName, text: $apiCredentialValue)
             }
@@ -136,6 +146,7 @@ struct ServiceSettingsSection: View {
             if service == .hermes {
                 hermesUsername = try keychain.value(for: service, account: .username) ?? ""
                 hermesPassword = try keychain.value(for: service, account: .password) ?? ""
+                hermesAPIToken = try keychain.value(for: service, account: .apiToken) ?? ""
             } else if let credential = service.apiCredential {
                 apiCredentialValue = try keychain.value(for: service, account: credential) ?? ""
             }
@@ -176,6 +187,9 @@ struct ServiceSettingsSection: View {
             // Das Passwort wird nicht getrimmt: Leerzeichen können Teil des
             // Geheimnisses sein. Nur ein leeres Feld löscht den Eintrag.
             try persistSecret(hermesPassword, account: .password)
+            // Der API-Schlüssel wird getrimmt; ein leeres Feld löscht ihn und
+            // schaltet Hermes zurück auf den Password-Login.
+            try persist(hermesAPIToken, account: .apiToken)
         } else if let credential = service.apiCredential {
             try persist(apiCredentialValue, account: credential)
         }
@@ -203,7 +217,10 @@ struct ServiceSettingsSection: View {
     /// und CF-Access zusammenpassen — nicht nur, dass der Host antwortet.
     ///
     /// Mealie/Grocy/Dashboard laufen über die `/api`-Basis, Hermes über den
-    /// Origin und trägt `/api` selbst im Pfad.
+    /// Origin und trägt `/api` selbst im Pfad. Für Hermes prüft der Test
+    /// `/v1/models` ohne Query: Dieser Endpunkt existiert nur auf dem
+    /// API-Server (Port 8642) und beweist damit zugleich die richtige Oberfläche;
+    /// das Dashboard antwortet dort mit 405 oder einer Weiterleitung.
     private var connectionTestRequest: APIRequest {
         switch service {
         case .mealie:
@@ -221,11 +238,7 @@ struct ServiceSettingsSection: View {
                 query: [URLQueryItem(name: "limit", value: "1")]
             )
         case .hermes:
-            return APIRequest(
-                method: .get,
-                path: "/api/sessions",
-                query: [URLQueryItem(name: "limit", value: "1")]
-            )
+            return APIRequest(method: .get, path: "/v1/models")
         }
     }
 
@@ -266,7 +279,8 @@ struct ServiceSettingsSection: View {
     /// kommen von Cloudflare Access, 404 heißt falscher Pfad. Der Pfad-Hinweis
     /// ist dienstspezifisch: Hermes erwartet den Origin ohne Pfad, die übrigen
     /// Dienste enden auf `/api` (MARAAA-142). Ein 302 wird nicht verfolgt und
-    /// bleibt darum als `Location` sichtbar.
+    /// bleibt darum als `Location` sichtbar. Für Hermes benennen 405 und 3xx
+    /// zusätzlich die verwechselte Oberfläche (Dashboard statt API-Server).
     private static func connectionMessage(
         status: Int,
         data: Data,
@@ -278,6 +292,9 @@ struct ServiceSettingsSection: View {
         }
         if status == 403 {
             return "Cloudflare Access: Service-Token fehlt oder ungültig."
+        }
+        if status == 405, service == .hermes {
+            return "Das ist das Hermes-Dashboard, nicht der API-Server: POST ist dort nicht erlaubt. Basis-URL auf den API-Server (Port 8642) setzen und API-Schlüssel eintragen."
         }
         if status == 404 {
             switch service {
@@ -291,6 +308,9 @@ struct ServiceSettingsSection: View {
             if isCloudflareRedirect(response) {
                 return "Cloudflare Access: Service-Token fehlt oder ungültig."
             }
+            if service == .hermes {
+                return "Das ist das Hermes-Dashboard (Weiterleitung auf /login). Chat braucht die API-Server-URL (Port 8642)."
+            }
             return "Dienst antwortet mit Umleitung (HTTP \(status))."
         }
         if (200..<300).contains(status) {
@@ -302,6 +322,9 @@ struct ServiceSettingsSection: View {
             guard isJSON(data) else {
                 return "Antwort nicht lesbar: kein JSON."
             }
+            if service == .hermes {
+                return "Verbindung erfolgreich (Hermes-API-Server)."
+            }
             return "Verbindung erfolgreich."
         }
         return "Dienst antwortet mit HTTP \(status)."
@@ -312,8 +335,10 @@ struct ServiceSettingsSection: View {
         case .grocy:
             return "API-Key"
         case .hermes:
-            // Hermes meldet sich mit Password-Login an, nicht mit einem Token.
-            return "Benutzername oder Passwort"
+            // Der Verbindungstest fragt `/v1/models` auf dem API-Server ab;
+            // dort zählt ausschließlich der API-Schlüssel. Benutzername und
+            // Passwort gelten nur für den Password-Login des Dashboards.
+            return "API-Schlüssel"
         case .mealie:
             return "API-Token"
         case .dashboard:

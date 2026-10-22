@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
 # Statischer Regressionstest für MARAAA-146 (Hermes-Auth nach MARAAA-145):
-#   (1) Kein Bearer für Hermes — genau eine Bearer-Stelle, im `.mealie`-Zweig.
+#   (1) Genau ein Bearer-Set je Dienstzweig: Mealie immer, Hermes nur im
+#       API-Token-Modus (`hermesUsesAPIToken`); im Cookie-Modus setzt der
+#       Hermes-Zweig keinen Authorization-Header.
 #   (2) Cloudflare-Access-Header auf jedem Request; der Login-Request läuft
 #       durch dieselbe `injectHeaders`-Kette.
 #   (3) Password-Login gegen `/auth/password-login` mit `provider` = `basic`,
@@ -11,11 +13,15 @@
 #   (5) Genau ein Re-Login bei 401 mit den belegten `reason`/`error`-Werten.
 #   (6) Gleichzeitige 401s koaleszieren zu einem Login (`actor` + `Task`).
 #   (7) `send`, `sendRaw` und `stream` nutzen denselben Login-/Cookie-Pfad.
-#   (8) Einstellungen: Hermes zeigt Benutzername/Passwort statt API-Token.
-#   (9) Fehlertexte nennen Benutzername/Passwort und behalten den CF-Hinweis.
+#   (8) Einstellungen: Hermes zeigt Benutzername/Passwort und zusätzlich das
+#       optionale API-Schlüssel-Feld (`.apiToken`).
+#   (9) Fehlertexte: Ein fehlgeschlagener Login nennt Benutzername/Passwort,
+#       der 401 des Verbindungstests für Hermes den API-Schlüssel; der
+#       CF-Hinweis bleibt erhalten.
 #  (10) Hermes verfolgt keine Redirects; ein 3xx löst genau einen Re-Login aus,
 #       die Wiederholung bleibt POST, und der Fehlertext nennt die Ursache
-#       (MARAAA-154).
+#       (MARAAA-154). Im API-Token-Modus ist der Re-Login ausgeschlossen; das
+#       prüft `Tests/verify_hermes_api_mode.sh` zusätzlich.
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen WP-Abnahmen laufen ebenfalls über grep-/Schema-Prüfungen.
@@ -117,13 +123,13 @@ api_error="Planer/Networking/APIError.swift"
 settings="Planer/Settings/ServiceSettingsSection.swift"
 chat_view_model="Planer/Features/Chat/ChatViewModel.swift"
 
-# --- (1) Kein Bearer für Hermes -------------------------------------------
+# --- (1) Ein Bearer-Set je Dienstzweig ------------------------------------
 
-bearer_count="$(grep -c 'Bearer' "$client" || true)"
-if [[ "$bearer_count" -eq 1 ]]; then
-    pass "genau eine Bearer-Stelle im NetworkClient"
+bearer_count="$(grep -c 'Bearer' <<<"$(strip_comments "$(cat "$client")")" || true)"
+if [[ "$bearer_count" -eq 2 ]]; then
+    pass "genau zwei Bearer-Stellen im NetworkClient (Mealie, Hermes-Token)"
 else
-    fail_check "genau eine Bearer-Stelle im NetworkClient (gefunden: $bearer_count)"
+    fail_check "genau zwei Bearer-Stellen im NetworkClient (gefunden: $bearer_count)"
 fi
 
 mealie_branch="$(section_between 'case .mealie:' 'case .hermes:' "$client")"
@@ -133,21 +139,32 @@ else
     fail_check "Bearer bleibt im Mealie-Zweig"
 fi
 
+# Der Hermes-Zweig hat zwei Betriebsarten: Cookie (Password-Login) und Bearer
+# (API-Server). Genau ein Bearer-Set, gebunden an `hermesUsesAPIToken`.
 hermes_branch="$(section_between 'case .hermes:' 'case .grocy:' "$client")"
-if [[ -n "$hermes_branch" ]] && ! grep -qF 'Authorization' <<<"$hermes_branch"; then
-    pass "Hermes-Zweig setzt keinen Authorization-Header"
+if [[ -n "$hermes_branch" ]] \
+    && grep -qF 'configuration.hermesUsesAPIToken' <<<"$hermes_branch" \
+    && grep -qF 'Bearer \(token)' <<<"$hermes_branch"; then
+    pass "Hermes-Zweig setzt Bearer nur im API-Token-Modus"
 else
-    fail_check "Hermes-Zweig setzt keinen Authorization-Header"
+    fail_check "Hermes-Zweig setzt Bearer nur im API-Token-Modus"
 fi
-if grep -qF 'injectHermesCookies' <<<"$hermes_branch"; then
-    pass "Hermes-Zweig setzt den Cookie-Header"
+hermes_bearer_count="$(grep -cF 'setValue("Bearer \(token)' <<<"$hermes_branch" || true)"
+if [[ "$hermes_bearer_count" -eq 1 ]]; then
+    pass "genau ein Bearer-Set im Hermes-Zweig"
 else
-    fail_check "Hermes-Zweig setzt den Cookie-Header"
+    fail_check "genau ein Bearer-Set im Hermes-Zweig (gefunden: $hermes_bearer_count)"
+fi
+if grep -qF '} else {' <<<"$hermes_branch" \
+    && grep -qF 'injectHermesCookies' <<<"$hermes_branch"; then
+    pass "Hermes-Zweig setzt den Cookie-Header im Cookie-Modus"
+else
+    fail_check "Hermes-Zweig setzt den Cookie-Header im Cookie-Modus"
 fi
 if grep -qF 'case .mealie:' "$configuration" && ! grep -qF 'case .hermes, .mealie:' "$configuration"; then
-    pass "ServiceConfiguration liest den API-Token nur für Mealie"
+    pass "API-Token wird in getrennten Dienstzweigen gelesen (Mealie, Hermes)"
 else
-    fail_check "ServiceConfiguration liest den API-Token nur für Mealie"
+    fail_check "API-Token wird in getrennten Dienstzweigen gelesen (Mealie, Hermes)"
 fi
 
 # --- (2) Cloudflare-Header auf jedem Request ------------------------------
@@ -375,17 +392,19 @@ require_fixed "Mealie behält den API-Token" \
 require_fixed "Mealie liefert weiterhin apiToken" \
     'return .apiToken' "$service_type"
 if grep -qF 'case .hermes, .mealie:' "$service_type"; then
-    fail_check "Hermes hat keinen API-Token-Account mehr"
+    fail_check "Hermes hat keinen kombinierten apiCredential-Zweig"
 else
-    pass "Hermes hat keinen API-Token-Account mehr"
+    pass "Hermes hat keinen kombinierten apiCredential-Zweig"
 fi
 
 # --- (9) Fehlertexte ------------------------------------------------------
 
 require_fixed "fehlgeschlagener Login nennt Benutzername/Passwort" \
     'Benutzername und Passwort prüfen' "$api_error"
-require_fixed "401 des Verbindungstests nennt Benutzername/Passwort" \
-    'return "Benutzername oder Passwort"' "$settings"
+# Der Verbindungstest fragt für Hermes `/v1/models` auf dem API-Server ab; ein
+# 401 dort kann nur den API-Schlüssel meinen (Dashboard-Zugang hilft nicht).
+require_fixed "401 des Verbindungstests nennt für Hermes den API-Schlüssel" \
+    'return "API-Schlüssel"' "$settings"
 require_fixed "CF-Hinweis bleibt erhalten" \
     'Cloudflare Access: Service-Token fehlt oder ungültig.' "$settings"
 require_fixed "Login-Fehler ist ein eigener Fall" \
@@ -393,11 +412,11 @@ require_fixed "Login-Fehler ist ein eigener Fall" \
 token_section="$(section_between 'private static func tokenName' 'private static func isJSON' "$settings")"
 hermes_token="$(awk '/case \.hermes:/{flag=1} flag{print} flag && /case \.mealie:/{exit}' <<<"$token_section")"
 if [[ -n "$hermes_token" ]] \
-    && grep -qF 'return "Benutzername oder Passwort"' <<<"$hermes_token" \
+    && grep -qF 'return "API-Schlüssel"' <<<"$hermes_token" \
     && ! grep -qF 'return "API-Token"' <<<"$hermes_token"; then
-    pass "Hermes-401 nennt nicht mehr API-Token"
+    pass "Hermes-401 nennt den API-Schlüssel statt eines Tokens"
 else
-    fail_check "Hermes-401 nennt nicht mehr API-Token"
+    fail_check "Hermes-401 nennt den API-Schlüssel statt eines Tokens"
 fi
 
 # --- (10) Redirects und 3xx als Auth-Signal -------------------------------
@@ -436,13 +455,13 @@ fi
 # Ohne diesen Block blieb das Skript grün, wenn Redirects zwar blockiert, aber
 # nicht als Auth-Signal behandelt werden (Mutation: 3xx-Zweig entfernen).
 if [[ "$(compact "$perform_code")" == *'letredirect=service==.hermes&&Self.isRedirect(http.statusCode)'* ]] \
-    && [[ "$(compact "$perform_code")" == *'if!didRelogin,expired||redirect'* ]]; then
+    && [[ "$(compact "$perform_code")" == *'if!didRelogin,!configuration.hermesUsesAPIToken,expired||redirect'* ]]; then
     pass "performRaw behandelt den Hermes-3xx vor dem didRelogin-Guard"
 else
     fail_check "performRaw behandelt den Hermes-3xx vor dem didRelogin-Guard"
 fi
 if [[ "$(compact "$stream_code")" == *'letredirect=service==.hermes&&Self.isRedirect(http.statusCode)'* ]] \
-    && [[ "$(compact "$stream_code")" == *'if!didRelogin,expired||redirect'* ]]; then
+    && [[ "$(compact "$stream_code")" == *'if!didRelogin,!configuration.hermesUsesAPIToken,expired||redirect'* ]]; then
     pass "Stream behandelt den Hermes-3xx vor dem didRelogin-Guard"
 else
     fail_check "Stream behandelt den Hermes-3xx vor dem didRelogin-Guard"

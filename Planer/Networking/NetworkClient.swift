@@ -155,7 +155,9 @@ struct NetworkClient {
     /// oder ein 3xx löst genau einen Re-Login und eine Wiederholung aus. Andere
     /// Nicht-2xx-Antworten werden nicht geworfen, weil der Fehlertext im Strom
     /// stehen kann: der Aufrufer prüft `response.statusCode` und liest den Body
-    /// begrenzt. Nur ein Hermes-401 muss dafür vorher gelesen werden.
+    /// begrenzt. Nur ein Hermes-401 muss dafür vorher gelesen werden. Im
+    /// API-Server-Modus (Bearer) entfällt der Re-Login; ein 3xx bleibt ein
+    /// Redirect-Fehler, ein 401 kommt als `.unauthorized` an.
     func stream(_ request: APIRequest, for service: ServiceType) async throws -> StreamingResponse {
         let configuration = try loadConfiguration(for: service)
         let urlRequest = try makeURLRequest(request, configuration: configuration)
@@ -181,7 +183,9 @@ struct NetworkClient {
 
             // Der 401-Body entscheidet über den Re-Login und muss dafür aus dem
             // Strom gelesen werden. Ein 3xx bleibt ohne Body sichtbar; beide
-            // betreffen ausschließlich Hermes (MARAAA-146/154).
+            // betreffen ausschließlich Hermes (MARAAA-146/154). Im
+            // API-Server-Modus (Bearer) gibt es keinen Re-Login: der 401 kommt
+            // als `.unauthorized` an, ein 3xx bleibt ein Redirect-Fehler.
             let redirect = service == .hermes && Self.isRedirect(http.statusCode)
             if service == .hermes, http.statusCode == 401 || redirect {
                 var body = Data()
@@ -189,7 +193,7 @@ struct NetworkClient {
                     body = (try? await Self.collect(bytes, limit: Self.maxAuthBodyBytes)) ?? Data()
                 }
                 let expired = HermesAuthFailure.indicatesExpiredSession(body)
-                if !didRelogin, expired || redirect {
+                if !didRelogin, !configuration.hermesUsesAPIToken, expired || redirect {
                     try await loginHermes(configuration: configuration)
                     var retried = urlRequest
                     injectHermesCookies(into: &retried)
@@ -285,7 +289,10 @@ struct NetworkClient {
     /// Grocy seinen API-Key, das Dashboard keinen. Hermes setzt seit
     /// MARAAA-146 keinen `Authorization`-Header mehr: dort authentifizieren
     /// die Cloudflare-Header den Dienst und die Password-Login-Cookies die
-    /// Sitzung. Auch der Login-Request läuft durch diese Injektion.
+    /// Sitzung. Seit der API-Server-Betriebsart gilt die Ausnahme nur noch für
+    /// das Dashboard: Ist ein Hermes-API-Schlüssel hinterlegt, trägt der
+    /// Request `Authorization: Bearer` und bewusst keinen `Cookie`-Header.
+    /// Auch der Login-Request läuft durch diese Injektion.
     private func injectHeaders(
         into request: inout URLRequest,
         accept: String,
@@ -303,7 +310,14 @@ struct NetworkClient {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
         case .hermes:
-            injectHermesCookies(into: &request)
+            if configuration.hermesUsesAPIToken, let token = configuration.apiToken {
+                // API-Server: Bearer statt Session-Cookies. Ein alter Cookie-
+                // Stand aus einem früheren Dashboard-Login darf nicht mitgehen.
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                request.setValue(nil, forHTTPHeaderField: "Cookie")
+            } else {
+                injectHermesCookies(into: &request)
+            }
         case .grocy:
             if let key = configuration.apiKey {
                 request.setValue(key, forHTTPHeaderField: "GROCY-API-KEY")
@@ -378,7 +392,8 @@ struct NetworkClient {
     /// Wiederholt werden Transportfehler sowie 429 und retryable 5xx; die
     /// Methodenprüfung liegt in `waitBeforeRetry`. Zusätzlich behandelt genau
     /// der Hermes-Zweig einen 401 mit abgelaufenen Cookies: `didRelogin`
-    /// begrenzt den Re-Login auf einen Versuch (MARAAA-146).
+    /// begrenzt den Re-Login auf einen Versuch (MARAAA-146). Im
+    /// API-Server-Modus (Bearer) entfällt dieser Re-Login vollständig.
     private func performRaw(
         _ request: URLRequest,
         service: ServiceType,
@@ -421,12 +436,14 @@ struct NetworkClient {
         // MARAAA-146/154: Ein Hermes-401 mit abgelaufener Sitzung und jeder
         // Hermes-3xx werden genau einmal durch einen neuen Password-Login und
         // eine Wiederholung ersetzt. Der zweite 3xx ist ein Fehler, keine
-        // Schleife; der zweite 401 bleibt ebenfalls ein Fehler.
+        // Schleife; der zweite 401 bleibt ebenfalls ein Fehler. Im
+        // API-Server-Modus (Bearer) ist beides ausgeschlossen: der 401 kommt
+        // als `.unauthorized` an, der 3xx als Redirect-Fehler.
         let expired = service == .hermes
             && http.statusCode == 401
             && HermesAuthFailure.indicatesExpiredSession(result.data)
         let redirect = service == .hermes && Self.isRedirect(http.statusCode)
-        if !didRelogin, expired || redirect {
+        if !didRelogin, !configuration.hermesUsesAPIToken, expired || redirect {
             try await loginHermes(configuration: configuration)
             var retried = request
             injectHermesCookies(into: &retried)
@@ -488,7 +505,12 @@ struct NetworkClient {
     /// trägt damit dieselben Cloudflare-Header wie jeder andere Request. Die
     /// Koaleszierung liegt in `HermesLoginCoordinator`: parallele 401s warten
     /// auf denselben Login statt einen Sturm auszulösen.
+    /// Grenze: Im API-Server-Modus (Bearer) kehrt die Methode sofort zurück —
+    /// dort gibt es weder Password-Login noch Cookies.
     private func loginHermes(configuration: ServiceConfiguration) async throws {
+        // Der API-Schlüssel authentifiziert bereits; ein Login gegen den
+        // API-Server existiert nicht (dort fehlt `/auth/password-login`).
+        guard !configuration.hermesUsesAPIToken else { return }
         guard configuration.service == .hermes else { return }
         guard let username = configuration.username,
               let password = configuration.password

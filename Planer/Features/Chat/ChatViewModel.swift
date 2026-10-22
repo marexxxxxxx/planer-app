@@ -532,9 +532,11 @@ final class ChatViewModel: ObservableObject {
             return status >= 500
         case .unauthorized, .forbidden, .notFound, .conflict,
              .rateLimited, .cancelled, .emptyResponse, .hermesLoginFailed,
-             .hermesAuthenticationRequired:
+             .hermesAuthenticationRequired, .methodNotAllowed:
             // Eine abgelehnte Hermes-Anmeldung behält ihre eigene Meldung und
-            // wird nicht als „Sitzung nicht anlegbar“ umgeschrieben.
+            // wird nicht als „Sitzung nicht anlegbar“ umgeschrieben. Ein 405
+            // behält den Hinweis auf Dashboard/API-Server, weil genau er die
+            // Ursache benennt (falsche Basis-URL).
             return false
         case .validation:
             // F9: 400 `invalid_title` wird wie F10 abgebrochen (gleicher Text);

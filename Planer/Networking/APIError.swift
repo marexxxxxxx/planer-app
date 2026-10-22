@@ -45,6 +45,12 @@ enum APIError: Error, Equatable, Sendable {
     case notFound
     case conflict(message: String)
     case rateLimited(retryAfter: TimeInterval?)
+    /// Der Server kennt die Methode an dieser Route nicht (HTTP 405).
+    ///
+    /// Bei Hermes heißt das fast immer, dass die Basis-URL auf das Dashboard
+    /// zeigt: dort gibt es `POST /api/sessions` und die `/v1/*`-Chat-Endpunkte
+    /// nicht, sie liegen auf dem API-Server (Port 8642).
+    case methodNotAllowed
     case validation(message: String)
     case server(status: Int, code: String, message: String, retryable: Bool)
     case emptyResponse
@@ -62,6 +68,8 @@ enum APIError: Error, Equatable, Sendable {
             return 403
         case .notFound:
             return 404
+        case .methodNotAllowed:
+            return 405
         case .conflict:
             return 409
         case .rateLimited:
@@ -85,7 +93,8 @@ enum APIError: Error, Equatable, Sendable {
         case .server(_, _, _, let retryable):
             return retryable
         case .conflict, .invalidConfiguration, .invalidRequest, .invalidResponse, .cancelled,
-             .unauthorized, .forbidden, .notFound, .validation, .emptyResponse, .decoding,
+             .unauthorized, .forbidden, .notFound, .methodNotAllowed, .validation,
+             .emptyResponse, .decoding,
              .hermesLoginFailed, .hermesAuthenticationRequired:
             return false
         }
@@ -112,6 +121,8 @@ enum APIError: Error, Equatable, Sendable {
             return .forbidden
         case 404:
             return .notFound
+        case 405:
+            return .methodNotAllowed
         case 409:
             return .conflict(message: message ?? "Version veraltet")
         case 429:
@@ -168,6 +179,8 @@ extension APIError: LocalizedError {
             return "Hermes-Anmeldung erforderlich — Benutzername/Passwort prüfen."
         case .notFound:
             return "Eintrag nicht gefunden."
+        case .methodNotAllowed:
+            return "Methode nicht erlaubt (405). Bei Hermes heißt das fast immer: Die Basis-URL zeigt auf das Dashboard statt auf den API-Server (Port 8642) — dort fehlen die Chat-Endpunkte."
         case .conflict(let message):
             return "Konflikt: \(message)"
         case .rateLimited:
