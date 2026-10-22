@@ -214,6 +214,26 @@ GET /v1/models              (mit Bearer)   -> 200 {"data":[{"id":"hermes-agent"}
 WS  /api/pty                             -> 403 (Dashboard-Auth), kein 502/504
 ```
 
+### Tunnel prüfen: zeigt die öffentliche URL auf den Proxy?
+
+Ein Statuscode genügt; der Body wird verworfen. Der Aufruf geht bewusst **ohne**
+`Authorization`-Header von außen gegen die öffentliche Adresse:
+
+```
+curl -s -o /dev/null -w '%{http_code}\n' https://<domain>/v1/models
+```
+
+| Antwort | Bedeutung |
+|---|---|
+| **401** | **Richtig — der Tunnel zeigt auf den Proxy.** Die Anfrage erreicht `hermes-front` (`127.0.0.1:9180`) und von dort den API-Server, der den fehlenden Bearer-Token mit `gateway_auth_failed` abweist. Für diesen Test ist der 401 der **Erfolgsfall**, nicht der Fehlerfall. |
+| **302** | **Noch nicht umgestellt — der Tunnel zeigt weiter auf das Dashboard** (Port 9119) und leitet auf `/login` um. Im Tunnel den Dienst auf `http://localhost:9180` ändern. |
+| **200** | Ohne Bearer **nicht zu erwarten**: der API-Server gibt `/v1/models` niemals ohne gültigen Schlüssel frei. Ein 200 an dieser Stelle ist darum kein Beweis für den Proxy, sondern ein Hinweis auf ein anderes Ziel — Ursache prüfen, nicht als Erfolg werten. |
+| **502 / 504** | Der Proxy antwortet, aber sein Upstream fehlt (`hermes-front.service` bzw. Caddyfile prüfen). |
+
+Erst danach lohnt der Gegentest **mit** Schlüssel (`grep '^API_SERVER_KEY=' ~/.hermes/.env | cut -d= -f2-`,
+Wert nur in der Kommandozeile, nicht in Dateien): derselbe Aufruf muss dann `200` mit
+`{"object":"list","data":[{"id":"hermes-agent",…}]}` liefern.
+
 ## Was der Betreiber noch konfigurieren muss
 
 1. **Cloudflare-Tunnel** (Zero Trust → Tunnel → Public Hostname): Dienst von
