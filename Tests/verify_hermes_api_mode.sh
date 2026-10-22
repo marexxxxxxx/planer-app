@@ -16,6 +16,14 @@
 #       auf `.apiToken`, Verbindungstest gegen `/v1/models`.
 #   (7) Die 405-Meldung des Verbindungstests nennt Dashboard und Port 8642.
 #   (8) Das README dokumentiert `API_SERVER_KEY` und den 405-Zusammenhang.
+#   (9) Jeder Hermes-Request trägt `X-Hermes-Client: planer`: die Zuweisung
+#       steht im Hermes-Zweig von `injectHeaders` und **vor** der
+#       `hermesUsesAPIToken`-Verzweigung, wirkt also im Token- und im
+#       Cookie-Modus. Mealie, Grocy und Dashboard senden den Header nicht.
+#   (10) Ein 401 des Hermes-API-Servers (`gateway_auth_failed`) wird zu
+#       `APIError.hermesAPIServerKeyRequired` (Status 401, nicht
+#       wiederholbar), nennt `API_SERVER_KEY` und wird in `ChatViewModel.describe`
+#       vor dem allgemeinen `unauthorized`-Fall mit eigener Meldung behandelt.
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen Abnahmen laufen ebenfalls über grep-/Schema-Prüfungen.
@@ -235,6 +243,99 @@ require_fixed "README nennt den 405-Zusammenhang" \
     '405' "$readme"
 require_fixed "README nennt den Port des API-Servers" \
     '8642' "$readme"
+
+# --- (9) App-Marker für den vorgeschalteten Proxy -------------------------
+
+marker_assignment='request.setValue("planer", forHTTPHeaderField: "X-Hermes-Client")'
+if grep -qF "$marker_assignment" <<<"$hermes_branch"; then
+    pass "Hermes-Zweig setzt X-Hermes-Client auf planer"
+else
+    fail_check "Hermes-Zweig setzt X-Hermes-Client auf planer ($client)"
+fi
+
+marker_line="$(grep -nF 'X-Hermes-Client' <<<"$hermes_branch" | head -n 1 | cut -d: -f1 || true)"
+switch_line="$(grep -nF 'if configuration.hermesUsesAPIToken' <<<"$hermes_branch" | head -n 1 | cut -d: -f1 || true)"
+if [[ -n "$marker_line" && -n "$switch_line" && "$marker_line" -lt "$switch_line" ]]; then
+    pass "X-Hermes-Client steht vor der hermesUsesAPIToken-Verzweigung"
+else
+    fail_check "X-Hermes-Client steht vor der hermesUsesAPIToken-Verzweigung ($client)"
+fi
+
+mealie_branch="$(section_text 'case [.]mealie:' 'case [.]hermes:' <<<"$inject_code")"
+grocy_branch="$(section_text 'case [.]grocy:' 'case [.]dashboard:' <<<"$inject_code")"
+dashboard_branch="$(section_text 'case [.]dashboard:' '^[[:space:]]*}$' <<<"$inject_code")"
+unmarked=1
+for branch in "$mealie_branch" "$grocy_branch" "$dashboard_branch"; do
+    [[ -n "$branch" ]] || continue
+    if grep -qF 'X-Hermes-Client' <<<"$branch"; then
+        unmarked=0
+    fi
+done
+if [[ "$unmarked" -eq 1 && -n "$mealie_branch" && -n "$grocy_branch" && -n "$dashboard_branch" ]]; then
+    pass "Mealie, Grocy und Dashboard senden X-Hermes-Client nicht"
+else
+    fail_check "Mealie, Grocy und Dashboard senden X-Hermes-Client nicht ($client)"
+fi
+
+# --- (10) 401 des API-Servers: Schlüssel statt Passwort -------------------
+
+chat="Planer/Features/Chat/ChatViewModel.swift"
+
+require_fixed "APIError hat den Fall hermesAPIServerKeyRequired" \
+    'case hermesAPIServerKeyRequired' "$api_error"
+status_code="$(strip_comments "$(section_between 'var httpStatus' 'var isRetryable' "$api_error")")"
+if [[ "$(compact "$status_code")" == *'case.hermesAPIServerKeyRequired:return401'* ]]; then
+    pass "hermesAPIServerKeyRequired trägt den Status 401"
+else
+    fail_check "hermesAPIServerKeyRequired trägt den Status 401 ($api_error)"
+fi
+retry_code="$(strip_comments "$(section_between 'var isRetryable' 'var retryAfter' "$api_error")")"
+retry_key_line="$(grep -nF '.hermesAPIServerKeyRequired' <<<"$retry_code" | head -n 1 | cut -d: -f1 || true)"
+retry_false_line="$(grep -nF 'case .conflict, .invalidConfiguration' <<<"$retry_code" | head -n 1 | cut -d: -f1 || true)"
+if [[ -n "$retry_key_line" && -n "$retry_false_line" && "$retry_key_line" -gt "$retry_false_line" ]]; then
+    pass "hermesAPIServerKeyRequired ist nicht wiederholbar"
+else
+    fail_check "hermesAPIServerKeyRequired ist nicht wiederholbar ($api_error)"
+fi
+
+from_code="$(strip_comments "$(section_between 'static func from' 'private static func decodePayload' "$api_error")")"
+status_401="$(section_text 'case 401:' 'case 403:' <<<"$from_code")"
+if [[ -n "$status_401" ]] \
+    && grep -qF 'gateway_auth_failed' <<<"$status_401" \
+    && grep -qF 'return .hermesAPIServerKeyRequired' <<<"$status_401" \
+    && grep -qF 'return .unauthorized' <<<"$status_401"; then
+    pass "401 mit gateway_auth_failed wird zu hermesAPIServerKeyRequired"
+else
+    fail_check "401 mit gateway_auth_failed wird zu hermesAPIServerKeyRequired ($api_error)"
+fi
+
+description_code="$(strip_comments "$(section_between 'var errorDescription' 'extension APIError' "$api_error")")"
+key_text="$(section_text 'case [.]hermesAPIServerKeyRequired:' 'case [.]notFound:' <<<"$description_code")"
+if [[ -n "$key_text" ]] \
+    && grep -qF 'Hermes-API-Server: API-Schlüssel fehlt oder ist ungültig (API_SERVER_KEY).' <<<"$key_text" \
+    && grep -qF 'Der Password-Login gilt nur für das Dashboard.' <<<"$key_text"; then
+    pass "der Fehlertext nennt API_SERVER_KEY und die Dashboard-Grenze"
+else
+    fail_check "der Fehlertext nennt API_SERVER_KEY und die Dashboard-Grenze ($api_error)"
+fi
+
+describe_code="$(strip_comments "$(section_between 'private static func describe[(]_ error: APIError[)]' 'private func isCancellation' "$chat")")"
+key_line="$(grep -nF 'case .hermesAPIServerKeyRequired' <<<"$describe_code" | head -n 1 | cut -d: -f1 || true)"
+unauthorized_line="$(grep -nF 'case .unauthorized' <<<"$describe_code" | head -n 1 | cut -d: -f1 || true)"
+if [[ -n "$key_line" && -n "$unauthorized_line" && "$key_line" -lt "$unauthorized_line" ]] \
+    && grep -qF 'error.errorDescription' <<<"$(section_text 'case [.]hermesAPIServerKeyRequired:' 'case [.]unauthorized' <<<"$describe_code")"; then
+    pass "ChatViewModel.describe behandelt den Fall vor unauthorized"
+else
+    fail_check "ChatViewModel.describe behandelt den Fall vor unauthorized ($chat)"
+fi
+
+create_code="$(strip_comments "$(section_between 'private static func isCreateFailure' 'private func streamTurn' "$chat")")"
+create_own="$(section_text 'case [.]unauthorized, .forbidden' 'case [.]validation:' <<<"$create_code")"
+if grep -qF '.hermesAPIServerKeyRequired' <<<"$create_own"; then
+    pass "isCreateFailure behält die Meldung des API-Schlüssel-Fehlers"
+else
+    fail_check "isCreateFailure behält die Meldung des API-Schlüssel-Fehlers ($chat)"
+fi
 
 if [[ "$fail" -ne 0 ]]; then
     echo "Ergebnis: FEHLGESCHLAGEN"

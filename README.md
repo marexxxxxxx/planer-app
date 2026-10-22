@@ -140,6 +140,14 @@ In den Einstellungen sind für den Chat-Betrieb deshalb einzutragen:
   abschließendes `/api`, z. B. `https://host:8642`.
 - **API-Schlüssel (API-Server, optional)**: der Wert von `API_SERVER_KEY`.
 
+Läuft beides hinter einem Reverse Proxy auf **einem** Host, ist die Basis-URL
+der eine öffentliche Origin (ohne Pfad, z. B. `https://host`) und der
+**API-Schlüssel erforderlich**: Der App-Verkehr geht an den API-Server, der
+ausschließlich `Authorization: Bearer <API_SERVER_KEY>` akzeptiert. Der
+Password-Login gilt nur für die Dashboard-Oberfläche, nicht für den API-Server
+— ein 401 von dort (`gateway_auth_failed`) meldet darum den fehlenden oder
+ungültigen `API_SERVER_KEY`, nicht falsche Zugangsdaten.
+
 Ist der Schlüssel gesetzt, sendet jeder Hermes-Request
 `Authorization: Bearer <key>` und keinen `Cookie`-Header; der Password-Login
 entfällt (er würde am API-Server mit 404 scheitern). Bleibt das Feld leer,
@@ -147,6 +155,13 @@ gilt unverändert der oben beschriebene Password-Login gegen das Dashboard.
 Der Verbindungstest fragt für Hermes `GET /v1/models` ab und erkennt daran den
 API-Server; 405 und eine Weiterleitung auf `/login` werden als
 „Dashboard statt API-Server“ gemeldet.
+
+Unabhängig von der Betriebsart trägt jeder Hermes-Request den Header
+`X-Hermes-Client: planer`; ein vorgeschalteter Proxy kann darüber App- und
+Dashboard-Verkehr trennen (beide nutzen `/api/*`). Der Header dient **nur** der
+Wegewahl und ist **keine** Autorisierung: Der Wert ist kein Secret, er
+beeinflusst die Authentifizierung nicht und ersetzt weder `API_SERVER_KEY` noch
+den Password-Login.
 
 ## Statische Abnahme
 

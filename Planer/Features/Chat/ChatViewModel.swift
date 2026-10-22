@@ -532,11 +532,14 @@ final class ChatViewModel: ObservableObject {
             return status >= 500
         case .unauthorized, .forbidden, .notFound, .conflict,
              .rateLimited, .cancelled, .emptyResponse, .hermesLoginFailed,
-             .hermesAuthenticationRequired, .methodNotAllowed:
+             .hermesAuthenticationRequired, .hermesAPIServerKeyRequired,
+             .methodNotAllowed:
             // Eine abgelehnte Hermes-Anmeldung behält ihre eigene Meldung und
             // wird nicht als „Sitzung nicht anlegbar“ umgeschrieben. Ein 405
             // behält den Hinweis auf Dashboard/API-Server, weil genau er die
-            // Ursache benennt (falsche Basis-URL).
+            // Ursache benennt (falsche Basis-URL). Ein 401 des API-Servers
+            // nennt den fehlenden `API_SERVER_KEY` und bleibt darum ebenfalls
+            // unverändert.
             return false
         case .validation:
             // F9: 400 `invalid_title` wird wie F10 abgebrochen (gleicher Text);
@@ -1064,6 +1067,11 @@ final class ChatViewModel: ObservableObject {
 
     private static func describe(_ error: APIError) -> String {
         switch error {
+        case .hermesAPIServerKeyRequired:
+            // Der API-Server kennt keinen Password-Login; hier ist der
+            // API-Schlüssel die Ursache, nicht Benutzername/Passwort.
+            return error.errorDescription
+                ?? "Hermes-API-Server: API-Schlüssel fehlt oder ist ungültig (API_SERVER_KEY)."
         case .unauthorized, .hermesLoginFailed:
             // Hermes meldet sich seit MARAAA-146 mit Benutzername/Passwort an.
             return "Hermes verweigert den Zugriff. Bitte Benutzername und Passwort in den Einstellungen prüfen."

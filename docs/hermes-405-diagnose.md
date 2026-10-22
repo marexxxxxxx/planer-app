@@ -101,9 +101,10 @@ Eine einzige Basis-URL kann mit dem heutigen Hermes nur eine der beiden Oberflä
 sein. Für den Chat braucht die App den **API-Server** und dessen **API-Schlüssel**;
 der Password-Login gehört zum Dashboard und ersetzt ihn nicht.
 
-Ein Proxy, der `/api/*` auf den API-Server umleitet, ist keine saubere Lösung: das
-Dashboard benutzt `GET /api/sessions` selbst für seine Sitzungsliste, eine pauschale
-Weiterleitung würde die Dashboard-Oberfläche brechen.
+Eine **pauschale** Weiterleitung von `/api/*` an den API-Server ist keine Lösung: das
+Dashboard benutzt `GET /api/sessions` selbst für seine Sitzungsliste. Trennen lässt sich
+der Verkehr nur an einem Merkmal, das die App und nicht der Browser sendet — die App
+trägt dafür `X-Hermes-Client: planer`.
 
 ## Änderung in der App
 
@@ -117,19 +118,58 @@ Weiterleitung würde die Dashboard-Oberfläche brechen.
 3. **Eigener Fehlerfall für 405.** `APIError.methodNotAllowed` nennt die Ursache
    (Dashboard statt API-Server, Port 8642) statt eines generischen Serverfehlers.
 
-## Was der Betreiber konfigurieren muss
+## Betrieb unter einer öffentlichen URL (umgesetzt)
 
-1. **API-Server erreichbar machen.** Der API-Server lauscht nur lokal
-   (`127.0.0.1:8642`). Er braucht einen eigenen Hostnamen bzw. Ingress in der
-   Cloudflare-Tunnel-Konfiguration, z. B. `hermes-api.example.com` →
-   `http://127.0.0.1:8642`, mit derselben Cloudflare-Access-Policy für das
-   Service-Token.
-2. **`API_SERVER_KEY` setzen/prüfen** (`hermes -p <profil> config get API_SERVER_KEY --raw`).
-   Der Schlüssel gehört in die App, nicht in das Repo.
-3. **In der App:** Hermes-Basis-URL = Origin des API-Servers (ohne Pfad), Feld
-   „API-Schlüssel (API-Server)“ ausfüllen. Benutzername/Passwort können leer bleiben;
-   sie gelten nur noch für das Dashboard.
-4. Danach „Test Verbindung“: erwartet wird „Verbindung erfolgreich (Hermes-API-Server).“
+Damit alles unter **einer** Adresse (`https://hermes.example.com`) erreichbar ist, läuft
+vor beiden Hermes-Prozessen ein Reverse Proxy als User-Service:
+
+| | |
+|---|---|
+| Dienst | `hermes-front.service` (`systemctl --user`) |
+| Proxy | Caddy, `127.0.0.1:9180`, Konfiguration `~/.config/hermes-front/Caddyfile` |
+| Upstreams | Dashboard `127.0.0.1:9119`, API-Server `127.0.0.1:8642` |
+
+Wegewahl (Caddy, in dieser Reihenfolge):
+
+| Anfrage | Ziel |
+|---|---|
+| `/api/*`, `/v1/*`, `/health` **mit** `X-Hermes-Client` | API-Server (Header wird durchgereicht) |
+| `/v1/*`, `/health` (ohne Marker) | API-Server |
+| alles andere (`/`, `/login`, `/auth/*`, `/api/*` ohne Marker) | Dashboard |
+
+Der Proxy **injiziert keinen Schlüssel**. `X-Hermes-Client` ist nur ein Routing-Hinweis,
+keine Autorisierung: ohne gültigen `Authorization: Bearer <API_SERVER_KEY>` antwortet der
+API-Server auch über den Proxy mit `401 gateway_auth_failed`. `flush_interval -1` hält
+SSE-Streams und den Dashboard-WebSocket (`/api/pty`) durchgängig.
+
+Verifiziert (lokal gegen `127.0.0.1:9180`, Host-Header der öffentlichen Domain):
+
+```
+GET /                                    -> 302 /login          (Dashboard)
+GET /api/auth/providers                  -> 200                 (Dashboard)
+POST /auth/password-login (falsch)       -> 401 Invalid credentials (Dashboard)
+GET /api/sessions            (ohne Marker) -> 401 reason=no_cookie    (Dashboard)
+GET /api/sessions   (Marker, ohne Bearer)  -> 401 gateway_auth_failed (API-Server)
+GET /api/sessions   (Marker + Bearer)      -> 200 {"object":"list"}   (API-Server)
+GET /v1/models              (ohne Bearer)  -> 401 gateway_auth_failed
+GET /v1/models              (mit Bearer)   -> 200 {"data":[{"id":"hermes-agent"}]}
+WS  /api/pty                             -> 403 (Dashboard-Auth), kein 502/504
+```
+
+## Was der Betreiber noch konfigurieren muss
+
+1. **Cloudflare-Tunnel** (Zero Trust → Tunnel → Public Hostname): Dienst von
+   `http://localhost:9119` auf `http://localhost:9180` umstellen. Der alte Wert ist der
+   Rückweg; der Proxy selbst lauscht nur auf Loopback, es wird nichts neu veröffentlicht.
+2. **`API_SERVER_KEY`** auslesen (`hermes -p <profil> config get API_SERVER_KEY --raw`)
+   und in der App hinterlegen — der Schlüssel gehört in die Keychain, nicht ins Repo und
+   nicht in die Proxy-Konfiguration.
+3. **In der App:** Hermes-Basis-URL = `https://hermes.example.com` (ohne Pfad), Feld
+   „API-Schlüssel (API-Server)“ ausfüllen. „Test Verbindung“ muss
+   „Verbindung erfolgreich (Hermes-API-Server).“ melden.
+4. Der Password-Login bleibt für die **Dashboard-Oberfläche** im Browser; der API-Server
+   kennt ihn nicht. Ein 401 von ihm erscheint in der App als
+   „API-Schlüssel fehlt oder ist ungültig (API_SERVER_KEY)“.
 
 ## Grenzen dieser Diagnose
 

@@ -293,6 +293,12 @@ struct NetworkClient {
     /// das Dashboard: Ist ein Hermes-API-Schlüssel hinterlegt, trägt der
     /// Request `Authorization: Bearer` und bewusst keinen `Cookie`-Header.
     /// Auch der Login-Request läuft durch diese Injektion.
+    /// Jeder Hermes-Request trägt zusätzlich `X-Hermes-Client: planer` — in
+    /// beiden Betriebsarten und damit vor der Token-/Cookie-Verzweigung.
+    /// Zweck: Der Wert ist kein Secret, er erlaubt einem vorgeschalteten Proxy
+    /// die Trennung von App- und Dashboard-Verkehr (beide nutzen `/api/*`).
+    /// Grenze: Die Authentifizierung beeinflusst der Header nicht; Mealie,
+    /// Grocy und Dashboard senden ihn nicht.
     private func injectHeaders(
         into request: inout URLRequest,
         accept: String,
@@ -310,6 +316,9 @@ struct NetworkClient {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
         case .hermes:
+            // Kennzeichnet App-Verkehr für einen vorgeschalteten Proxy; kein
+            // Secret und unabhängig von der Betriebsart (Token oder Cookie).
+            request.setValue("planer", forHTTPHeaderField: "X-Hermes-Client")
             if configuration.hermesUsesAPIToken, let token = configuration.apiToken {
                 // API-Server: Bearer statt Session-Cookies. Ein alter Cookie-
                 // Stand aus einem früheren Dashboard-Login darf nicht mitgehen.

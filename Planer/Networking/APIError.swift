@@ -42,6 +42,14 @@ enum APIError: Error, Equatable, Sendable {
     /// Grenze: `cloudflareAccess` unterscheidet nur die Ursache; die `Location`
     /// selbst wird nicht angezeigt.
     case hermesAuthenticationRequired(cloudflareAccess: Bool)
+    /// Der Hermes-API-Server hat den API-Schlüssel abgelehnt (HTTP 401,
+    /// `code: "gateway_auth_failed"`).
+    ///
+    /// Zweck: Der API-Server kennt keinen Password-Login; ein 401 von ihm heißt
+    /// immer „`API_SERVER_KEY` fehlt oder ist falsch“, nie „Benutzername oder
+    /// Passwort prüfen“. Grenze: trägt bewusst keinen Servertext — die Meldung
+    /// bleibt stabil und nennt weder Schlüssel noch Zugangsdaten.
+    case hermesAPIServerKeyRequired
     case notFound
     case conflict(message: String)
     case rateLimited(retryAfter: TimeInterval?)
@@ -63,6 +71,8 @@ enum APIError: Error, Equatable, Sendable {
         case .validation:
             return 400
         case .unauthorized:
+            return 401
+        case .hermesAPIServerKeyRequired:
             return 401
         case .forbidden:
             return 403
@@ -95,7 +105,8 @@ enum APIError: Error, Equatable, Sendable {
         case .conflict, .invalidConfiguration, .invalidRequest, .invalidResponse, .cancelled,
              .unauthorized, .forbidden, .notFound, .methodNotAllowed, .validation,
              .emptyResponse, .decoding,
-             .hermesLoginFailed, .hermesAuthenticationRequired:
+             .hermesLoginFailed, .hermesAuthenticationRequired,
+             .hermesAPIServerKeyRequired:
             return false
         }
     }
@@ -116,6 +127,13 @@ enum APIError: Error, Equatable, Sendable {
         case 400:
             return .validation(message: message ?? "Ungültige Anfrage")
         case 401:
+            // Der API-Server antwortet auf einen fehlenden/falschen
+            // `API_SERVER_KEY` mit `gateway_auth_failed`; nur dort ist der
+            // Hinweis auf den Schlüssel richtig. Alles andere bleibt der
+            // allgemeine 401 (Dashboard-Session, Cloudflare).
+            if payload?.error.code == "gateway_auth_failed" {
+                return .hermesAPIServerKeyRequired
+            }
             return .unauthorized
         case 403:
             return .forbidden
@@ -177,6 +195,8 @@ extension APIError: LocalizedError {
                 return "Cloudflare Access: Service-Token fehlt oder ungültig."
             }
             return "Hermes-Anmeldung erforderlich — Benutzername/Passwort prüfen."
+        case .hermesAPIServerKeyRequired:
+            return "Hermes-API-Server: API-Schlüssel fehlt oder ist ungültig (API_SERVER_KEY). Der Password-Login gilt nur für das Dashboard."
         case .notFound:
             return "Eintrag nicht gefunden."
         case .methodNotAllowed:
