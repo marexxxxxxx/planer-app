@@ -264,7 +264,9 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 | **302** | Der Proxy liefert das Dashboard; Caddy-Wegewahl bzw. Upstream prüfen. |
 | **502 / 504** | Caddy bzw. `hermes-front.service` oder dessen Upstream fehlt. |
 
-**b) Öffentlich mit Service-Token** (prüft Access **und** Origin in einem Aufruf):
+**b) Öffentlich mit Service-Token** (prüft Access **und** Origin in einem Aufruf).
+Die beiden Werte kommen aus dem **eigenen** Cloudflare-Access-Service-Token und
+gehören nicht ins Repo, nicht in die Doku und nicht in Logs:
 
 ```
 curl -s -o /dev/null -w '%{http_code}\n' \
@@ -294,10 +296,10 @@ mit dem Token offen, und der Origin ist das Dashboard — unabhängig davon, woh
 Tunnel zeigt. Zusammen mit dem `302` auf `/login?next=…` ist das der eindeutige
 Nachweis „Tunnel noch 9119“, und er braucht **kein neues Service-Token**.
 
-Dieses Token ist auf dem Host schon vorhanden: `~/.hermes/credentials/mealie.env`,
-Schlüssel `CF_ACCESS_CLIENT_ID` und `CF_ACCESS_CLIENT_SECRET` (nur die Namen; Werte
-gehören nicht in die Doku, ins Repo oder in Logs). Vor jedem neuen Token zuerst damit
-prüfen — die Messung oben entstand genau so.
+Geprüft wird mit dem Cloudflare-Access-Service-Token, mit dem du die Domain bereits
+aufrufst — es gilt **account-/policyweit**, nicht dienstspezifisch. Ist es für diese
+Anwendung erlaubt, ist die Prüfung ohne weiteres Zutun möglich; die Messung oben
+entstand genau so.
 
 **Ohne** Token ist ein `302` auf `cloudflareaccess.com` dagegen **erwartet** und
 **kein Tunnel-Fehler**.
@@ -317,11 +319,9 @@ Wert nur in der Kommandozeile, nicht in Dateien): derselbe Aufruf muss dann `200
 1. **Cloudflare-Tunnel** (Zero Trust → Tunnel → Public Hostname): Dienst von
    `http://localhost:9119` auf `http://localhost:9180` umstellen. Der alte Wert ist der
    Rückweg; der Proxy selbst lauscht nur auf Loopback, es wird nichts neu veröffentlicht.
-2. **Service-Token für Cloudflare Access** — zuerst **prüfen**, nicht anlegen: Das
-   Token der anderen Dienste (`~/.hermes/credentials/mealie.env`, Schlüssel
-   `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`) ist für `<domain>` bereits gültig
-   (Prüfung b oben: `GET /api/status` → `200`). Ein **neues** Token ist nur nötig, wenn
-   die Access-Policy das vorhandene nicht erlaubt — dann in Zero Trust → Access →
+2. **Service-Token für Cloudflare Access** — zuerst **prüfen**, nicht anlegen: Ein
+   vorhandenes Service-Token der Domain zuerst prüfen (Prüfung b oben); ein **neues**
+   ist nur nötig, wenn die Policy es nicht erlaubt — dann in Zero Trust → Access →
    Applications → die Anwendung für `<domain>` ein Service-Token anlegen und in der
    Policy eine Regel **„Service Auth“** dafür erlauben (neben dem Browser-Login). Ohne
    ein erlaubtes Token antwortet Access an der Edge mit `302` auf

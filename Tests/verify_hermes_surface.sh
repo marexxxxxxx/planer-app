@@ -26,10 +26,11 @@
 #       und den Service-Token-Weg (CF-Access-Client-Id/-Secret, Policy
 #       „Service Auth“). Ein 302 auf `/login?next=…` belegt dabei den Origin
 #       Dashboard (Tunnel noch 9119), ein 302 auf `cloudflareaccess.com` den
-#       Access-Block am Edge. Das vorhandene Token liegt auf dem Host in
-#       `~/.hermes/credentials/mealie.env` — nur Datei- und Schlüsselnamen,
-#       keine Werte. Die frühere Allein-Erklärung „302 = Tunnel zeigt
-#       weiter auf das Dashboard“ ist entfernt.
+#       Access-Block am Edge. Das Token ist account-/policyweit und nicht
+#       dienstspezifisch; die Doku nennt keine Ablage-Datei, sondern nur die
+#       Umgebungsvariablen `$CF_ACCESS_CLIENT_ID`/`$CF_ACCESS_CLIENT_SECRET`
+#       und schließt Token-Werte aus. Die frühere Allein-Erklärung „302 =
+#       Tunnel zeigt weiter auf das Dashboard“ ist entfernt.
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen WP-Abnahmen laufen ebenfalls über grep-/Schema-Prüfungen.
@@ -581,15 +582,19 @@ require_fixed "Doku verweist auf die Token-Injektion im NetworkClient" \
 require_fixed "Doku verweist auf die Fehlermeldung in APIError" \
     'APIError.swift:194-195' "$docs"
 
-# Das Service-Token der anderen Dienste ist für diese Domain schon gültig: die
-# Doku nennt Datei und Schlüsselnamen (keine Werte), damit niemand ein neues
-# Token anlegt, bevor er das vorhandene geprüft hat.
-require_fixed "Doku nennt die Datei des vorhandenen Service-Tokens" \
-    '~/.hermes/credentials/mealie.env' "$docs"
-require_fixed "Doku nennt den Schlüsselnamen der Client-ID" \
-    'CF_ACCESS_CLIENT_ID' "$docs"
-require_fixed "Doku nennt den Schlüsselnamen des Client-Secrets" \
-    'CF_ACCESS_CLIENT_SECRET' "$docs"
+# Das Cloudflare-Access-Service-Token ist account-/policyweit, nicht an einen
+# Dienst gebunden. Die Doku nennt darum keine Ablage-Datei, sondern nur die
+# Umgebungsvariablen der Beispielbefehle — und keine Werte.
+require_fixed "Doku nennt die Client-ID als Umgebungsvariable" \
+    '$CF_ACCESS_CLIENT_ID' "$docs"
+require_fixed "Doku nennt das Client-Secret als Umgebungsvariable" \
+    '$CF_ACCESS_CLIENT_SECRET' "$docs"
+require_fixed "Doku ordnet das Token account-/policyweit ein" \
+    'account-/policyweit' "$docs"
+require_fixed "Doku nennt das Token nicht dienstspezifisch" \
+    'nicht dienstspezifisch' "$docs"
+forbid "Doku verweist auf keine Ablage-Datei für das Token" \
+    'credentials/[a-z]+[.]env' "$docs"
 # Kein Secret im Diff: nach dem Schlüsselnamen darf kein Wert folgen.
 forbid "Doku enthält keinen Service-Token-Wert" \
     'CF_ACCESS_CLIENT_SECRET=[^[:space:]]' "$docs"
