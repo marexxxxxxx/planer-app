@@ -43,8 +43,8 @@ struct HermesChatConfiguration: Sendable, Equatable {
     /// REST-Aufrufe (Liste, Nachrichten, Anlegen, Freigabe). Default und
     /// Grenzen kommen aus `ChatPreferences` (Rev 6 O1).
     var restTimeout: TimeInterval = 30
-    /// Untätigkeits-Timeout des Stroms; größer als der Server-Freigabe-Timeout
-    /// von 300 s, damit eine legitime Freigabe nicht abgeschnitten wird.
+    /// Untätigkeits-Timeout des Stroms; größer als der Server-Freigabe-Timeout,
+    /// damit eine legitime Freigabe nicht abgeschnitten wird.
     var streamIdleTimeout: TimeInterval = 900
     /// Server-Deckel für die Verlaufsliste ist 200.
     var sessionPageSize = 50
@@ -52,6 +52,11 @@ struct HermesChatConfiguration: Sendable, Equatable {
     var messagePageSize = 100
     /// 5 × 100 = 500 geladene Nachrichten (Server-Deckel).
     var maxMessagePages = 5
+
+    /// Frist einer Server-Freigabe, gespiegelt vom Server-Default
+    /// (`approvals.timeout`, `gateway/run.py:4071`). Die App zeigt sie an und
+    /// sendet nach ihrem Ablauf nichts mehr — die Wahrheit bleibt der Server.
+    var approvalTimeout: TimeInterval = 300
 
     // MARK: Textgrenzen
 
@@ -61,6 +66,10 @@ struct HermesChatConfiguration: Sendable, Equatable {
     var maxToolDetailCharacters = 4_000
     var maxPreviewCharacters = 80
     var maxNoticeCharacters = 300
+    /// Obergrenze für einen Befehl, der noch geprüft freigegeben werden kann.
+    /// Darüber zeigt die Karte nur „Ablehnen“ (FF-4): wer den Befehl nicht
+    /// lesen kann, darf ihn nicht autorisieren.
+    var maxCommandCharacters = 12_000
 
     // MARK: Profil-Präfix
 

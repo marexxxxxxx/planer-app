@@ -8,6 +8,7 @@
 
 import Combine
 import Foundation
+import UIKit
 
 /// Führt den Chat: listet und lädt Sitzungen, sendet genau einen User-Turn,
 /// führt Denken und Werkzeug-Lebenszeichen als Daten und beantwortet
@@ -21,6 +22,17 @@ import Foundation
 /// Die Klasse ist `@MainActor`, weil sie direkt SwiftUI-Zustand hält.
 @MainActor
 final class ChatViewModel: ObservableObject {
+
+    /// Die eine Instanz je Prozess (§3.5.4).
+    ///
+    /// Sie überlebt das Entfernen des View-Baums durch die App-Sperre. Nicht
+    /// die View hält den Turn, sondern dieses Modell; die Sperre selbst bleibt
+    /// unangetastet.
+    static let shared = ChatViewModel()
+
+    /// Hinweis nach der Rückkehr aus dem Hintergrund; wörtlich (§3.5.5).
+    /// Er behauptet weder, der Turn habe weiterlief, noch dass er abbrach.
+    static let backgroundResumeNotice = "Der Chat war im Hintergrund. Der Verlauf wurde vom Server neu geladen."
 
     /// Eine Zeile im Verlauf.
     struct Entry: Identifiable, Equatable {
@@ -66,8 +78,21 @@ final class ChatViewModel: ObservableObject {
 
         // Freigabe
         var approval: ChatApproval?
-        /// `true`, sobald der POST beantwortet wurde.
-        var approvalResolved: Bool
+        /// Gespeicherter Zustand des Freigabe-POSTs; `.expired` entsteht nur
+        /// über `ApprovalPhase.derive` (§5.1).
+        var approvalPhase: ApprovalPhase = .open
+        /// Empfangszeit des `approval.request`; `nil` = keine Frist bekannt.
+        var approvalReceivedAt: Date?
+        /// Name der letzten Werkzeugkarte dieses Turns zum Empfangszeitpunkt
+        /// (`approval.request` trägt kein Werkzeugfeld, §0.4).
+        var approvalToolName: String?
+        /// `true`, wenn der Befehl die Obergrenze überschreitet — dann gibt es
+        /// keinen „Ausführen“-Knopf (FF-4).
+        var approvalCommandTooLong: Bool = false
+
+        /// `true`, sobald der POST beantwortet wurde. Berechnet aus dem
+        /// gespeicherten Zustand: die Frist ist kein POST-Ergebnis (§4.2).
+        var approvalResolved: Bool { !approvalPhase.waitsForUser }
 
         init(
             id: UUID = UUID(),
@@ -84,7 +109,6 @@ final class ChatViewModel: ObservableObject {
             toolStatus: ToolCallStatus? = nil,
             toolDetailDisclosure: Disclosure = .collapsed,
             approval: ChatApproval? = nil,
-            approvalResolved: Bool = false,
             reasoningAutoExpanded: Bool = false
         ) {
             self.id = id
@@ -102,7 +126,6 @@ final class ChatViewModel: ObservableObject {
             self.toolStatus = toolStatus
             self.toolDetailDisclosure = toolDetailDisclosure
             self.approval = approval
-            self.approvalResolved = approvalResolved
         }
     }
 
@@ -168,6 +191,12 @@ final class ChatViewModel: ObservableObject {
     private var sessionOffset = 0
     private var historyPagesLoaded = 0
     private var didWarnReasoningTruncated = false
+    /// Beobachter des App-Lebenszyklus; einmal je Instanz registriert (§3.5.2).
+    private var lifecycleObservers: [NSObjectProtocol] = []
+    /// `true`, wenn seit dem letzten Hintergrundwechsel ein Turn lief.
+    private var resumeAfterBackground = false
+    /// Die laufende Hintergrund-Aufgabe; `.invalid` = keine (§5.1).
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     init(
         preferences: ChatPreferences = .shared,
@@ -184,6 +213,13 @@ final class ChatViewModel: ObservableObject {
         self.configuration = preferences.configuration
         self.api = apiFactory(self.configuration)
         self.provider = providerFactory(self.configuration)
+        registerLifecycleObservers()
+    }
+
+    deinit {
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     // MARK: Konfiguration
@@ -214,6 +250,44 @@ final class ChatViewModel: ObservableObject {
             // E5: eine bestehende Session darf erst senden, wenn ihr Verlauf
             // (auch eine leere Seite) geladen ist. `nil` = neue Session.
             && (currentSession == nil || historyLoaded)
+    }
+
+    // MARK: Live-Status
+
+    /// Die Phase des laufenden Turns; `nil` außerhalb eines Turns (§4.3).
+    ///
+    /// Berechnet aus `isStreaming`, `streamStarted`, `turnEntryIDs` und
+    /// `entries` — kein gespeicherter Zustand, kein Setter und damit auch
+    /// nichts, das nach einem Abbruch hängen bliebe.
+    var turnPhase: ChatTurnPhase? {
+        guard isStreaming else { return nil }
+
+        let hasWaitingApproval = entries.contains { entry in
+            entry.kind == .approval
+                && turnEntryIDs.contains(entry.id)
+                && ApprovalPhase.derive(
+                    stored: entry.approvalPhase,
+                    receivedAt: entry.approvalReceivedAt,
+                    timeout: configuration.approvalTimeout,
+                    now: Date()
+                ).waitsForUser
+        }
+        if hasWaitingApproval { return .awaitingApproval }
+
+        if let runningTool = entries.last(where: {
+            turnEntryIDs.contains($0.id) && $0.kind == .tool && $0.toolStatus == .running
+        }), let name = runningTool.toolName, !name.isEmpty {
+            return .tool(name: name)
+        }
+
+        if let lastAgent = entries.last(where: {
+            $0.kind == .agent && turnEntryIDs.contains($0.id)
+        }), !lastAgent.text.isEmpty {
+            return .writing
+        }
+
+        if !streamStarted { return .connecting }
+        return .thinking
     }
 
     // MARK: Arbeitsanzeige
@@ -491,6 +565,91 @@ final class ChatViewModel: ObservableObject {
         offersHistoryReload = false
     }
 
+    // MARK: App-Lebenszyklus
+
+    /// Registriert die beiden Lebenszyklus-Beobachter (§3.5.2).
+    ///
+    /// Benachrichtigungen statt `scenePhase`: `PlanerApp` setzt beim Wechsel in
+    /// den Hintergrund sofort `isUnlocked = false` und entfernt den View-Baum.
+    /// Ein `@Environment(\.scenePhase)` in `ChatView` käme zu spät; das
+    /// ViewModel überlebt den Baum und empfängt die Benachrichtigung.
+    private func registerLifecycleObservers() {
+        let center = NotificationCenter.default
+        lifecycleObservers = [
+            center.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.handleDidEnterBackground()
+                }
+            },
+            center.addObserver(
+                forName: UIApplication.willEnterForegroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.handleWillEnterForeground()
+                }
+            }
+        ]
+    }
+
+    /// Ohne laufenden Turn passiert nichts — kein Hintergrund-Task, kein
+    /// Merker. Sonst merkt sich das Modell den Turn und bittet iOS um Zeit.
+    func handleDidEnterBackground() {
+        guard isStreaming else { return }
+        resumeAfterBackground = true
+        beginBackgroundTaskIfNeeded()
+    }
+
+    /// Beendet die Hintergrund-Aufgabe **immer**; lädt nur nach, wenn ein Turn
+    /// lief und der Strom nicht mehr lebt (E15: der Strom gewinnt).
+    func handleWillEnterForeground() {
+        endBackgroundTaskIfNeeded()
+        guard resumeAfterBackground else { return }
+        resumeAfterBackground = false
+        guard !isStreaming else { return }
+        Task { await reconcileAfterBackground() }
+    }
+
+    /// Lädt den Serverstand über den vorhandenen, getesteten Verlaufspfad
+    /// (`openSession` → `GET /api/sessions/{id}/messages`).
+    ///
+    /// Grenze: keine zweite Merge-Logik und keine eigene Fehlerbehandlung —
+    /// `openSession` setzt seine Meldung selbst; nur wenn keine da ist, kommt
+    /// der Hintergrund-Hinweis (§3.5.3).
+    func reconcileAfterBackground() async {
+        guard !isStreaming else { return }
+        guard let session = currentSession else { return }
+        await openSession(session)
+        if notice == nil {
+            notice = Self.backgroundResumeNotice
+        }
+        resumeAfterBackground = false
+        offersHistoryReload = false
+    }
+
+    /// Genau-einmal-Riegel für die Hintergrund-Aufgabe (§3.5.3).
+    private func beginBackgroundTaskIfNeeded() {
+        guard isStreaming else { return }
+        guard backgroundTask == .invalid else { return }
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "chat-turn") {
+            Task { @MainActor in
+                self.endBackgroundTaskIfNeeded()
+            }
+        }
+    }
+
+    /// Beendet die Aufgabe idempotent; danach ist der Platz wieder frei.
+    private func endBackgroundTaskIfNeeded() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
     // MARK: Disclosure
 
     /// Öffnet die Denk-Klappe genau einmal je Eintrag, solange noch kein
@@ -517,16 +676,40 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Freigabe
 
+    /// Der vollständige Befehl für den Bestätigungsdialog; `nil`, wenn die ID
+    /// nicht existiert, keine Freigabe ist oder keinen Befehl trägt (§4.4).
+    ///
+    /// Grenze: gibt den Befehl **unverkürzt** zurück — der Dialog muss genau
+    /// den Text zeigen, den der Nutzer autorisiert.
+    func approvalCommand(for entryID: UUID) -> String? {
+        guard let entry = entries.first(where: { $0.id == entryID }),
+              entry.kind == .approval,
+              let approval = entry.approval
+        else { return nil }
+        return approval.command
+    }
+
+    /// Die Frist in Sekunden — die einzige Stelle, an der sie in die View
+    /// gelangt (§4.4). Keine eigene Zahl in der Oberfläche.
+    var approvalTimeoutSeconds: Int { Int(configuration.approvalTimeout) }
+
     /// Beantwortet eine Server-Freigabe. Fail closed: eine nicht angebotene
-    /// Choice wird nie gesendet.
+    /// Choice und jede Freigabe nach Fristablauf werden nie gesendet.
     func decideApproval(_ entryID: UUID, choice: ChatApprovalChoice) async {
         refreshConfiguration()
         guard decidingApprovalEntryID == nil,
               let index = entries.firstIndex(where: { $0.id == entryID }),
               entries[index].kind == .approval,
-              !entries[index].approvalResolved,
               let approval = entries[index].approval
         else { return }
+
+        let derivedPhase = ApprovalPhase.derive(
+            stored: entries[index].approvalPhase,
+            receivedAt: entries[index].approvalReceivedAt,
+            timeout: configuration.approvalTimeout,
+            now: Date()
+        )
+        guard derivedPhase.acceptsDecision else { return }
 
         switch choice {
         case .once:
@@ -537,21 +720,29 @@ final class ChatViewModel: ObservableObject {
 
         decidingApprovalEntryID = entryID
         defer { decidingApprovalEntryID = nil }
+        entries[index].approvalPhase = .sending
 
         do {
             try await api.respondToApproval(runID: approval.runID, choice: choice)
             guard let current = entries.firstIndex(where: { $0.id == entryID }) else { return }
-            entries[current].approvalResolved = true
-            entries[current].toolStatus = choice == .once ? .running : .denied
-        } catch {
-            guard let current = entries.firstIndex(where: { $0.id == entryID }) else { return }
-            if isConflict(error) {
-                // F14: der Server hat bereits entschieden; der Strom läuft weiter.
-                entries[current].approvalResolved = true
-                entries[current].toolStatus = .denied
-                notice = "Freigabe nicht mehr aktiv."
-            } else {
-                notice = displayText(for: error)
+            entries[current].approvalPhase = choice == .once ? .executed : .denied
+            // A3: `once` lässt `toolStatus` auf `.running`, damit die folgende
+            // Werkzeugkarte übernimmt.
+            if choice == .once {
+                entries[current].toolStatus = .running
+            }
+        }
+        catch {
+            if let current = index(of: entryID) {
+                if isConflict(error) {
+                    // F14: der Server hat bereits entschieden; welche
+                    // Entscheidung, sagt nur er — nicht der Client.
+                    entries[current].approvalPhase = .conflict
+                    notice = "Freigabe nicht mehr aktiv."
+                } else {
+                    entries[current].approvalPhase = .open
+                    notice = displayText(for: error)
+                }
             }
         }
     }
@@ -790,15 +981,29 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func apply(_ approval: ChatApproval) {
-        let entry = Entry(
+        var entry = Entry(
             kind: .approval,
             text: approval.description ?? "",
             toolStatus: .awaitingApproval,
-            approval: approval,
-            approvalResolved: false
+            approval: approval
         )
+        entry.approvalPhase = .open
+        entry.approvalReceivedAt = Date()
+        entry.approvalToolName = lastToolNameInTurn()
+        entry.approvalCommandTooLong =
+            (approval.command ?? "").count > configuration.maxCommandCharacters
         entries.append(entry)
         turnEntryIDs.insert(entry.id)
+    }
+
+    /// Name der letzten benannten Werkzeugkarte dieses Turns; `nil`, wenn es
+    /// keine gibt (`approval.request` trägt kein Werkzeugfeld).
+    private func lastToolNameInTurn() -> String? {
+        entries.last(where: {
+            turnEntryIDs.contains($0.id)
+                && $0.kind == .tool
+                && !($0.toolName ?? "").isEmpty
+        })?.toolName
     }
 
     private func apply(_ finish: ChatFinish) {

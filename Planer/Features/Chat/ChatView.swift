@@ -18,10 +18,13 @@ import SwiftUI
 /// deshalb kein `connect()`/`disconnect()`.
 struct ChatView: View {
 
-    @StateObject private var viewModel = ChatViewModel()
+    @ObservedObject private var viewModel = ChatViewModel.shared
     @EnvironmentObject private var voice: VoiceCoordinator
     @FocusState private var isInputFocused: Bool
     @State private var showsSessions = false
+    /// Die Freigabe, deren Bestätigungsdialog offen ist. Genau **ein**
+    /// Presenter im Baum (§3.3.4).
+    @State private var confirmingApprovalEntryID: UUID?
 
     /// Anker für das automatische Scrollen ans Ende.
     private let bottomAnchor = "chat-bottom"
@@ -30,6 +33,7 @@ struct ChatView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 statusBar
+                phaseBar
                 if let notice = viewModel.notice {
                     noticeBar(notice)
                 }
@@ -39,6 +43,32 @@ struct ChatView: View {
                 composer
             }
             .background(DesignTokens.Palette.groupedBackground)
+            .confirmationDialog(
+                "Befehl ausführen?",
+                isPresented: Binding(
+                    get: { confirmingApprovalEntryID != nil },
+                    set: { isPresented in
+                        if !isPresented { confirmingApprovalEntryID = nil }
+                    }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Ausführen", role: .destructive) {
+                    guard let entryID = confirmingApprovalEntryID else { return }
+                    confirmingApprovalEntryID = nil
+                    Task { await viewModel.decideApproval(entryID, choice: .once) }
+                }
+                Button("Abbrechen", role: .cancel) {
+                    confirmingApprovalEntryID = nil
+                }
+            } message: {
+                if let entryID = confirmingApprovalEntryID,
+                   let command = viewModel.approvalCommand(for: entryID) {
+                    Text(command)
+                } else {
+                    Text("Der Befehl ist nicht mehr verfügbar.")
+                }
+            }
             .navigationTitle("Chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -129,6 +159,17 @@ struct ChatView: View {
             return SessionListView.displayTitle(for: session)
         }
         return "Neue Unterhaltung"
+    }
+
+    // MARK: Live-Status (§3.4)
+
+    /// Die Phasen-Zeile: für die gesamte Dauer von `isStreaming` sichtbar,
+    /// außerhalb des Scrollinhalts, zusätzlich zu `WorkingIndicatorView` (O5).
+    @ViewBuilder
+    private var phaseBar: some View {
+        if let phase = viewModel.turnPhase {
+            ChatPhaseStatusView(phase: phase)
+        }
     }
 
     private func noticeBar(_ notice: String) -> some View {
@@ -273,59 +314,120 @@ struct ChatView: View {
     }
 
     private func approvalCard(for entry: ChatViewModel.Entry) -> some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
-            HStack(spacing: DesignTokens.Spacing.xs) {
-                Image(systemName: "hand.raised")
-                    .font(DesignTokens.Typography.footnote)
-                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+        // §3.3.6 / §4.6: die Uhr liegt um Zustandstext und Chips, damit
+        // „Abgelaufen“ nach der Frist ohne Timer und ohne Nutzeraktion
+        // erscheint. Die Reihenfolge der Zeilen folgt §3.3.2.
+        TimelineView(.periodic(from: entry.approvalReceivedAt ?? .distantPast, by: 1)) { context in
+            let approvalPhase = ApprovalPhase.derive(
+                stored: entry.approvalPhase,
+                receivedAt: entry.approvalReceivedAt,
+                timeout: TimeInterval(viewModel.approvalTimeoutSeconds),
+                now: context.date
+            )
 
-                Text("Freigabe")
-                    .font(DesignTokens.Typography.footnote)
-                    .foregroundStyle(DesignTokens.Palette.label)
+            VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
+                HStack(spacing: DesignTokens.Spacing.xs) {
+                    Image(systemName: "hand.raised")
+                        .font(DesignTokens.Typography.footnote)
+                        .foregroundStyle(DesignTokens.Palette.secondaryLabel)
 
-                Spacer(minLength: DesignTokens.Spacing.xs)
+                    Text("Freigabe")
+                        .font(DesignTokens.Typography.footnote)
+                        .foregroundStyle(DesignTokens.Palette.label)
 
-                Text((entry.toolStatus ?? .awaitingApproval).displayLabel)
-                    .font(DesignTokens.Typography.footnote)
-                    .foregroundStyle(
-                        (entry.toolStatus ?? .awaitingApproval).displayTint
+                    Spacer(minLength: DesignTokens.Spacing.xs)
+
+                    Text(approvalPhase.label)
+                        .font(DesignTokens.Typography.footnote)
+                        .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                }
+
+                if entry.approvalCommandTooLong {
+                    // FF-4: wer den Befehl nicht lesen kann, darf ihn nicht
+                    // autorisieren — deshalb wird er hier gar nicht gerendert.
+                    Text(
+                        "Der Befehl ist zu lang, um ihn geprüft freizugeben "
+                        + "(\(entry.approval?.command?.count ?? 0) Zeichen)."
                     )
-            }
-
-            if let command = entry.approval?.command, !command.isEmpty {
-                Text(command)
-                    .font(DesignTokens.Typography.footnote.monospaced())
+                    .font(DesignTokens.Typography.footnote)
                     .foregroundStyle(DesignTokens.Palette.label)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
-            }
+                    .fixedSize(horizontal: false, vertical: true)
+                } else if let command = entry.approval?.command, !command.isEmpty {
+                    // A1: der Befehl wird vollständig gerendert — kein `lineLimit`.
+                    Text(command)
+                        .font(DesignTokens.Typography.footnote.monospaced())
+                        .foregroundStyle(DesignTokens.Palette.label)
+                        .textSelection(.enabled)
+                        .copyableAction(entry.approval?.command)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-            if !entry.text.isEmpty {
-                Text(entry.text)
+                    Button("Befehl kopieren") {
+                        TextClipboard.copy(entry.approval?.command)
+                    }
+                    .font(DesignTokens.Typography.footnote)
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Befehl kopieren")
+                }
+
+                if let description = entry.approval?.description, !description.isEmpty {
+                    Text(description)
+                        .font(DesignTokens.Typography.footnote)
+                        .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .copyableText(entry.approval?.description)
+                } else {
+                    Text("Keine Beschreibung vom Server. Der Befehl oben wird unverändert ausgeführt.")
+                        .font(DesignTokens.Typography.footnote)
+                        .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Werkzeug: \(entry.approvalToolName ?? "vom Server nicht benannt")")
                     .font(DesignTokens.Typography.footnote)
                     .foregroundStyle(DesignTokens.Palette.secondaryLabel)
                     .fixedSize(horizontal: false, vertical: true)
-            }
 
-            if let approval = entry.approval, !entry.approvalResolved {
-                ToolConfirmationChips(
-                    approval: approval,
-                    isSending: viewModel.decidingApprovalEntryID == entry.id,
-                    onDecide: { choice in
-                        Task {
-                            await viewModel.decideApproval(entry.id, choice: choice)
+                if let approval = entry.approval {
+                    Text(approval.runID)
+                        .font(DesignTokens.Typography.footnote.monospaced())
+                        .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .copyableText(approval.runID)
+                        .accessibilityLabel(Text("Run-ID \(approval.runID)"))
+                }
+
+                if let approval = entry.approval, !entry.approvalResolved {
+                    ToolConfirmationChips(
+                        approval: approval,
+                        phase: approvalPhase,
+                        allowsExecute: !entry.approvalCommandTooLong,
+                        onRequestExecute: {
+                            confirmingApprovalEntryID = entry.id
+                        },
+                        onDeny: {
+                            Task { await viewModel.decideApproval(entry.id, choice: .deny) }
                         }
-                    }
+                    )
+                }
+
+                Text(
+                    "Die Freigabe verfällt \(viewModel.approvalTimeoutSeconds) s nach dem Ereignis. "
+                    + "Ohne Antwort führt der Server den Befehl nicht aus."
                 )
+                .font(DesignTokens.Typography.footnote)
+                .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(DesignTokens.Spacing.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                DesignTokens.Palette.secondaryBackground,
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)
+            )
+            .accessibilityElement(children: .contain)
         }
-        .padding(DesignTokens.Spacing.m)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            DesignTokens.Palette.secondaryBackground,
-            in: RoundedRectangle(cornerRadius: DesignTokens.Radius.card, style: .continuous)
-        )
-        .accessibilityElement(children: .contain)
     }
 
     private var emptyState: some View {

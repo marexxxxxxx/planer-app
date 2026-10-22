@@ -65,6 +65,7 @@ struct MessageBubbleView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("\(role.accessibilityPrefix): \(text)"))
+        .copyableText(text)
     }
 }
 

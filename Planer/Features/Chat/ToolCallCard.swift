@@ -139,6 +139,7 @@ struct ToolCallCard: View {
                         : DesignTokens.Palette.label
                 )
                 .textSelection(.enabled)
+                .copyableAction(value)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
