@@ -24,7 +24,11 @@
 #   (7b) Die Doku unterscheidet die zwei 302-Quellen (Cloudflare Access am
 #       Edge vs. Dashboard auf 9119), nennt die Origin-Prüfung mit Host-Header
 #       und den Service-Token-Weg (CF-Access-Client-Id/-Secret, Policy
-#       „Service Auth“). Die frühere Allein-Erklärung „302 = Tunnel zeigt
+#       „Service Auth“). Ein 302 auf `/login?next=…` belegt dabei den Origin
+#       Dashboard (Tunnel noch 9119), ein 302 auf `cloudflareaccess.com` den
+#       Access-Block am Edge. Das vorhandene Token liegt auf dem Host in
+#       `~/.hermes/credentials/mealie.env` — nur Datei- und Schlüsselnamen,
+#       keine Werte. Die frühere Allein-Erklärung „302 = Tunnel zeigt
 #       weiter auf das Dashboard“ ist entfernt.
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
@@ -577,6 +581,21 @@ require_fixed "Doku verweist auf die Token-Injektion im NetworkClient" \
 require_fixed "Doku verweist auf die Fehlermeldung in APIError" \
     'APIError.swift:194-195' "$docs"
 
+# Das Service-Token der anderen Dienste ist für diese Domain schon gültig: die
+# Doku nennt Datei und Schlüsselnamen (keine Werte), damit niemand ein neues
+# Token anlegt, bevor er das vorhandene geprüft hat.
+require_fixed "Doku nennt die Datei des vorhandenen Service-Tokens" \
+    '~/.hermes/credentials/mealie.env' "$docs"
+require_fixed "Doku nennt den Schlüsselnamen der Client-ID" \
+    'CF_ACCESS_CLIENT_ID' "$docs"
+require_fixed "Doku nennt den Schlüsselnamen des Client-Secrets" \
+    'CF_ACCESS_CLIENT_SECRET' "$docs"
+# Kein Secret im Diff: nach dem Schlüsselnamen darf kein Wert folgen.
+forbid "Doku enthält keinen Service-Token-Wert" \
+    'CF_ACCESS_CLIENT_SECRET=[^[:space:]]' "$docs"
+forbid "Doku enthält keinen Client-ID-Wert" \
+    'CF_ACCESS_CLIENT_ID=[^[:space:]]' "$docs"
+
 # Die alte Fehlaussage darf nicht mehr als einzige Erklärung stehen.
 forbid_fixed "Doku behauptet 302 nicht mehr allein als Dashboard-Weiterleitung" \
     'Noch nicht umgestellt — der Tunnel zeigt weiter auf das Dashboard' "$docs"
@@ -612,6 +631,35 @@ if grep -qF '**401**' <<<"$tunnel_section" \
 else
     fail_check "Tunnel-Abschnitt behält 401 als Erfolgsfall und 502/504"
 fi
+# Die gemessene Tabelle zu (b): ein 302 mit /login?next=… heißt Dashboard,
+# ein 302 auf cloudflareaccess.com heißt Access. Beide Fälle müssen als
+# getrennte Zeilen dastehen, sonst ist der Befund wieder mehrdeutig.
+if grep -qF '/login?next=' <<<"$tunnel_section" \
+    && grep -qF 'location: /login' <<<"$tunnel_section" \
+    && grep -qF 'cloudflareaccess.com' <<<"$tunnel_section"; then
+    pass "Prüfung (b) trennt 302 auf /login?next=… vom Access-302"
+else
+    fail_check "Prüfung (b) trennt 302 auf /login?next=… vom Access-302"
+fi
+if grep -qF 'Tunnel zeigt noch auf 9119' <<<"$tunnel_section" \
+    && grep -qF 'Access blockt am Edge' <<<"$tunnel_section"; then
+    pass "Prüfung (b) deutet beide 302-Fälle (Dashboard vs. Access)"
+else
+    fail_check "Prüfung (b) deutet beide 302-Fälle (Dashboard vs. Access)"
+fi
+# /api/status mit Token beweist Access + Origin unabhängig vom Tunnel-Ziel.
+if grep -qF 'GET /api/status' <<<"$tunnel_section" \
+    && grep -qF 'api_server.state=connected' <<<"$tunnel_section" \
+    && grep -qF 'listener_base=http://127.0.0.1:8642' <<<"$tunnel_section"; then
+    pass "Doku nutzt /api/status → 200 als Access-und-Origin-Nachweis"
+else
+    fail_check "Doku nutzt /api/status → 200 als Access-und-Origin-Nachweis"
+fi
+if grep -qF 'kein neues Service-Token' <<<"$tunnel_section"; then
+    pass "Doku hält fest, dass kein neues Service-Token nötig ist"
+else
+    fail_check "Doku hält fest, dass kein neues Service-Token nötig ist"
+fi
 
 operator_section="$(section_between '^## Was der Betreiber noch konfigurieren muss' '^## Grenzen dieser Diagnose' "$docs")"
 if grep -qF 'Service-Token' <<<"$operator_section" \
@@ -625,6 +673,13 @@ if grep -qF '302' <<<"$operator_section"; then
     pass "Betreiber-Abschnitt nennt die Folge ohne Service-Token (302)"
 else
     fail_check "Betreiber-Abschnitt nennt die Folge ohne Service-Token (302)"
+fi
+# Erst prüfen, dann anlegen: ein neues Token ist nur bei abweichender Policy nötig.
+if grep -qF 'nur nötig, wenn' <<<"$operator_section" \
+    && grep -qF 'zuerst **prüfen**' <<<"$operator_section"; then
+    pass "Betreiber-Abschnitt prüft erst das vorhandene Token"
+else
+    fail_check "Betreiber-Abschnitt prüft erst das vorhandene Token"
 fi
 require_fixed "README verweist auf die Diagnose" \
     'docs/hermes-405-diagnose.md' "$readme"

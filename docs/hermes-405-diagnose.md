@@ -230,7 +230,7 @@ curl -sSI https://<domain>/v1/models | grep -i '^location:'
 | enthält `cloudflareaccess.com` | **Cloudflare Access** (Edge) | Die Anfrage erreicht den **Origin nie**. Über Tunnel, Proxy und API-Server ist damit **nichts** gesagt — der Origin-Zustand bleibt unbekannt. Prüfbar nur mit Service-Token (b) oder direkt am Origin (a). |
 | endet auf `/<domain>/login` | **Dashboard** (Port 9119) | Der Tunnel zeigt noch auf das Dashboard. Im Tunnel den Dienst auf `http://localhost:9180` ändern. |
 
-Am laufenden Host gemessen: `302` mit
+**Ohne** Service-Token am laufenden Host gemessen: `302` mit
 `location: https://<team>.cloudflareaccess.com/cdn-cgi/access/login/<domain>?…&redirect_url=%2Fv1%2Fmodels`,
 `www-authenticate: Cloudflare-Access`, im Meta-JWT `"service_token_status":false`.
 Dieser 302 **bleibt nach dem Tunnel-Wechsel bestehen** — Access sitzt davor. Er ist
@@ -273,8 +273,34 @@ curl -s -o /dev/null -w '%{http_code}\n' \
   https://<domain>/v1/models
 ```
 
-**401** = Access, Proxy und API-Server sind in Ordnung. **Ohne** Token ist ein `302`
-auf `cloudflareaccess.com` dagegen **erwartet** und **kein Tunnel-Fehler**.
+Mit dem vorhandenen Token gemessen (`Location` zusätzlich mit `-sSI` ansehen):
+
+```
+GET /api/status                     (Token)              -> 200
+   api_server.state=connected, listener_base=http://127.0.0.1:8642
+GET /v1/models                      (Token)              -> 302  location: /login?next=%2Fv1%2Fmodels
+GET /v1/models                      (Token + Bearer)     -> 302  location: /login?next=%2Fv1%2Fmodels
+```
+
+| Antwort auf `GET /v1/models` (mit Token, ohne Bearer) | `Location` | Bedeutung |
+|---|---|---|
+| **302** | `/login?next=…` | Access ist passiert, der Origin ist das **Dashboard** → der Tunnel zeigt noch auf 9119. Kein Access-Problem. |
+| **302** | `…cloudflareaccess.com…` | Token ungültig oder von der Policy nicht erlaubt → **Access blockt am Edge**; über den Origin ist nichts gesagt. |
+| **401** | — | Access + Proxy + API-Server in Ordnung (nur der Bearer fehlt). |
+| **200** (mit Bearer) | — | Vollständig bereit: Access, Proxy und API-Server. |
+
+Ein `GET /api/status` → `200` beweist Access **und** Origin in einem Schritt: Access ist
+mit dem Token offen, und der Origin ist das Dashboard — unabhängig davon, wohin der
+Tunnel zeigt. Zusammen mit dem `302` auf `/login?next=…` ist das der eindeutige
+Nachweis „Tunnel noch 9119“, und er braucht **kein neues Service-Token**.
+
+Dieses Token ist auf dem Host schon vorhanden: `~/.hermes/credentials/mealie.env`,
+Schlüssel `CF_ACCESS_CLIENT_ID` und `CF_ACCESS_CLIENT_SECRET` (nur die Namen; Werte
+gehören nicht in die Doku, ins Repo oder in Logs). Vor jedem neuen Token zuerst damit
+prüfen — die Messung oben entstand genau so.
+
+**Ohne** Token ist ein `302` auf `cloudflareaccess.com` dagegen **erwartet** und
+**kein Tunnel-Fehler**.
 
 Die App braucht dasselbe Service-Token in den Einstellungen
 (`CF-Access-Client-ID` / `CF-Access-Client-Secret`); sie sendet es als
@@ -291,12 +317,15 @@ Wert nur in der Kommandozeile, nicht in Dateien): derselbe Aufruf muss dann `200
 1. **Cloudflare-Tunnel** (Zero Trust → Tunnel → Public Hostname): Dienst von
    `http://localhost:9119` auf `http://localhost:9180` umstellen. Der alte Wert ist der
    Rückweg; der Proxy selbst lauscht nur auf Loopback, es wird nichts neu veröffentlicht.
-2. **Service-Token für Cloudflare Access** (Zero Trust → Access → Applications → die
-   Anwendung für `<domain>`): ein Service-Token anlegen, in der Policy eine Regel
-   **„Service Auth“** für dieses Token erlauben (neben dem Browser-Login), und
-   Client-ID/Secret notieren. Ohne diesen Schritt antwortet Access an der Edge weiter
-   mit `302` auf `cloudflareaccess.com` — auch bei korrektem Tunnel, und die App kommt
-   am Origin nie an.
+2. **Service-Token für Cloudflare Access** — zuerst **prüfen**, nicht anlegen: Das
+   Token der anderen Dienste (`~/.hermes/credentials/mealie.env`, Schlüssel
+   `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`) ist für `<domain>` bereits gültig
+   (Prüfung b oben: `GET /api/status` → `200`). Ein **neues** Token ist nur nötig, wenn
+   die Access-Policy das vorhandene nicht erlaubt — dann in Zero Trust → Access →
+   Applications → die Anwendung für `<domain>` ein Service-Token anlegen und in der
+   Policy eine Regel **„Service Auth“** dafür erlauben (neben dem Browser-Login). Ohne
+   ein erlaubtes Token antwortet Access an der Edge mit `302` auf
+   `cloudflareaccess.com` — auch bei korrektem Tunnel, und die App kommt am Origin nie an.
 3. **`API_SERVER_KEY`** auslesen
    (`grep '^API_SERVER_KEY=' ~/.hermes/.env | cut -d= -f2-`) und in der App
    hinterlegen — der Schlüssel gehört in die Keychain, nicht ins Repo und nicht
