@@ -44,14 +44,12 @@ struct HermesProfilePage: Decodable, Sendable {
 /// auf die Handeingabe wechseln kann (F-R6-6).
 struct HermesProfileDirectory: Sendable {
 
-    private let configuration: HermesChatConfiguration
     private let networkClient: NetworkClient
 
     init(
         configuration: HermesChatConfiguration = HermesChatConfiguration(),
         networkClient: NetworkClient? = nil
     ) {
-        self.configuration = configuration
         self.networkClient = networkClient ?? NetworkClient(timeout: configuration.restTimeout)
     }
 

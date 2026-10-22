@@ -13,7 +13,7 @@ import Foundation
 /// Zweck: Stream-Timeout, REST-Timeout und Hermes-Profil an genau einer Stelle
 /// lesen, klemmen und speichern; `ChatViewModel` baut seine Konfiguration nur
 /// hieraus.
-/// Grenze: keine Netzwerk-, UI- oder Chat-Zustandslogik; keine Secrets.
+/// Grenze: keine Netzwerk-, UI- oder Chat-Zustandslogik; keine Geheimnisse.
 @MainActor
 final class ChatPreferences: ObservableObject {
 

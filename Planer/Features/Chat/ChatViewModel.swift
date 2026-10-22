@@ -190,7 +190,14 @@ final class ChatViewModel: ObservableObject {
 
     /// Baut API und Provider neu, wenn ein Nutzerwert sich geändert hat. Ein
     /// laufender Strom wird nicht angefasst (Rev 6 §3.2.3).
+    ///
+    /// Grenze (N1.2/F6): während `isStreaming` wird nichts ersetzt. Ein Turn
+    /// behält `configuration`, `api` und `provider`, mit denen er gestartet
+    /// ist — sonst liefen Freigabe-POST, Merge und Timeout-Meldung nach einem
+    /// Profilwechsel über ein anderes Profil als der Strom. Geänderte
+    /// Nutzerwerte gelten ab dem nächsten Turn.
     private func refreshConfiguration() {
+        guard !isStreaming else { return }
         let wanted = preferences.configuration
         guard wanted != configuration else { return }
         configuration = wanted
@@ -308,6 +315,9 @@ final class ChatViewModel: ObservableObject {
         hasMoreOlder = false
         historyPagesLoaded = 0
         didWarnReasoningTruncated = false
+        // F3/N1.4: „Verlauf neu laden“ gehört ausschließlich zur
+        // Timeout-Meldung des Turns, in dem der Timeout auftrat.
+        offersHistoryReload = false
         defer { isLoadingHistory = false }
 
         do {
@@ -393,6 +403,8 @@ final class ChatViewModel: ObservableObject {
         historyPagesLoaded = 0
         notice = nil
         statusNote = nil
+        // F3/N1.4: ein neuer Chat trägt kein Timeout-Angebot des alten Turns.
+        offersHistoryReload = false
     }
 
     // MARK: Senden
@@ -837,12 +849,18 @@ final class ChatViewModel: ObservableObject {
                     .compactMap(\.toolCallID)
             )
 
+            // N1.3/F1: der Auf-/Zu-Zustand der Denk-Klappe des laufenden Turns
+            // wird vor dem Entfernen festgehalten und nach dem Neuaufbau
+            // übertragen — sonst schließt sie am Turn-Ende ohne Nutzeraktion.
+            let carriedReasoningDisclosure = turnReasoningDisclosure()
+
             // Nur Agent- und Freigabe-Einträge des Turns weichen dem
             // Serverstand; Werkzeugkarten behalten ihre Live-Identität.
             entries.removeAll { entry in
                 turnEntryIDs.contains(entry.id) && (entry.kind == .agent || entry.kind == .approval)
             }
 
+            let rebuiltStart = entries.count
             var consumedOptimisticUser = false
             for message in fresh {
                 switch message.role {
@@ -856,6 +874,8 @@ final class ChatViewModel: ObservableObject {
                     continue
                 }
             }
+
+            carryReasoningDisclosure(carriedReasoningDisclosure, onto: rebuiltStart)
 
             // Der Turn ist zu Ende; ein noch laufender Status wäre gelogen.
             for index in entries.indices where entries[index].kind == .tool {
@@ -969,6 +989,31 @@ final class ChatViewModel: ObservableObject {
                 toolStatus: .completed
             )
         )
+    }
+
+    /// N1.3/F1: Hält den Auf-/Zu-Zustand der Denk-Klappe des Agent-Eintrags
+    /// dieses Turns fest, bevor `merge` ihn durch den Serverstand ersetzt.
+    ///
+    /// Grenze: nur Einträge dieses Turns (`turnEntryIDs`) und nur solche mit
+    /// Denken. `nil` heißt „kein Live-Agent-Eintrag“ — der neu aufgebaute
+    /// Eintrag bleibt dann bei seinem Default `.collapsed`.
+    private func turnReasoningDisclosure() -> Entry.Disclosure? {
+        entries.last(where: {
+            turnEntryIDs.contains($0.id) && $0.kind == .agent && $0.reasoning != nil
+        })?.reasoningDisclosure
+    }
+
+    /// N1.3/F1: Trägt den festgehaltenen Zustand auf den zuletzt aus dem
+    /// Serververlauf aufgebauten Agent-Eintrag mit Denken (`entries[start...]`).
+    /// `reasoningAutoExpanded` wird bewusst **nicht** gesetzt: die Automatik
+    /// öffnet oder schließt diesen Eintrag nicht wieder, die Nutzerentscheidung
+    /// bleibt erhalten.
+    private func carryReasoningDisclosure(_ disclosure: Entry.Disclosure?, onto start: Int) {
+        guard let disclosure, start < entries.count else { return }
+        guard let index = entries[start...].lastIndex(where: {
+            $0.kind == .agent && $0.reasoning != nil
+        }) else { return }
+        entries[index].reasoningDisclosure = disclosure
     }
 
     private func syncCurrentSessionWithList() {
