@@ -794,6 +794,9 @@ final class ChatViewModel: ObservableObject {
             statusNote = nil
             createdSessionThisTurn = false
             turnStartedAt = nil
+            // R-CH5: beide Turn-Felder ueberleben den Turn nicht mehr.
+            streamRequested = false
+            mergeFallbackDuration = nil
         }
         do {
             // O7: erst prüfen, ob der Server das Profil ausliefert — ein 404
@@ -834,6 +837,10 @@ final class ChatViewModel: ObservableObject {
         if case .merged(let agentEntries) = outcome, agentEntries > 0 {
             return true
         }
+        // R-CH5: hat der Nutzer waehrend des Rettungs-`GET` abgebrochen, ist
+        // das kein leeres Ergebnis. Der Abbruch behaelt seine Meldung
+        // („Antwort abgebrochen.“) und bekommt weder F8-Text noch Knopf.
+        guard !Task.isCancelled else { return false }
 
         // Rettung erfolglos: die sichtbare Tatsache ist „keine Antwort“, und
         // der vorhandene Knopf bietet den manuellen Weg an (Rev 8 §6.1/§6.2).
@@ -1542,6 +1549,9 @@ final class ChatViewModel: ObservableObject {
     /// Text übergeht.
     static func durationText(seconds: TimeInterval, minimum: TimeInterval) -> String? {
         guard seconds.isFinite else { return nil }
+        // R-CH5: die Umrechnung nach `Int` trappt oberhalb des `Int`-Bereichs
+        // (z. B. 1e30); eine so grosse Dauer ist keine Anzeige.
+        guard seconds <= TimeInterval(Int.max) else { return nil }
         // Abgerundet auf ganze Sekunden: 59.9 s darf nicht „1 min 0 s“ werden.
         let total = Int(floor(seconds))
         guard total >= 0, TimeInterval(total) >= minimum else { return nil }
