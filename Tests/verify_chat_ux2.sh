@@ -19,6 +19,11 @@
 # Probe M1–M20 aus §7.4 macht den zugehörigen Abschnitt rot; die
 # Mutationsmatrix steht im Bericht zu MARAAA-173.
 #
+# Nachtrag R-CH4 (MARAAA-176): K22a/K22b/K23a–c, F55–F59, P25/P26 und B28–B30 sind
+# die Regressionen zu den Befunden F1–F4 aus G-CH3. Sie prüfen den **Rumpf**
+# (Handler, Karte, Verzweigung), nicht die Datei — die Mutationsmatrix dazu
+# steht im Bericht zu MARAAA-176.
+#
 # Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
 # Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
 # (`approvalTimeout`) und Zeile 68 (`maxNoticeCharacters`, unverändert aus
@@ -134,6 +139,54 @@ section_order() {
     fi
 }
 
+# Rumpf ab der Zeile mit $2 bis zur schließenden Klammer derselben
+# Verschachtelungstiefe. Gezählt werden `{` und `}` je Zeile. Damit prüft eine
+# Aussage „im Rumpf von X“ und nicht „irgendwo in der Datei“ — bei F1 ist genau
+# das der Unterschied zwischen „synchron im Handler“ und „im Hop daneben“.
+# Voraussetzung: die geprüften Rümpfe führen keine Klammern in Zeichenketten
+# (Kommentare dürfen das Wort `Task` enthalten, aber kein `{` danach).
+brace_block() {
+    awk -v s="$2" '
+        !on && index($0, s) > 0 { on = 1 }
+        on {
+            print
+            line = $0
+            o = gsub(/\{/, "", line)
+            c = gsub(/\}/, "", line)
+            depth += o - c
+            if (seen && depth <= 0) exit
+            if (o > 0) seen = 1
+        }' "$1"
+}
+
+block_has() {
+    local file="$1" start="$2" pattern="$3" label="$4" body
+    body="$(brace_block "$file" "$start")"
+    if [[ -z "$body" ]]; then
+        bad "$label  [$file: Rumpf ab »$start« nicht gefunden]"
+        return
+    fi
+    if grep -qE "$pattern" <<<"$body"; then
+        pass "$label"
+    else
+        bad "$label  [$file, Rumpf ab »$start« ~ /$pattern/]"
+    fi
+}
+
+block_lacks() {
+    local file="$1" start="$2" pattern="$3" label="$4" body
+    body="$(brace_block "$file" "$start")"
+    if [[ -z "$body" ]]; then
+        bad "$label  [$file: Rumpf ab »$start« nicht gefunden]"
+        return
+    fi
+    if grep -qE "$pattern" <<<"$body"; then
+        bad "$label  [$file, Rumpf ab »$start« ~ /$pattern/]"
+    else
+        pass "$label"
+    fi
+}
+
 # Muster kommt unter `Planer/` vor, aber in keiner der genannten Dateien.
 # Die ausgeschlossenen Pfade werden **wörtlich** samt `:` gefiltert, damit
 # kein Regex-Zeichen im Pfad (Punkt, Klammer) die Grenze verschiebt.
@@ -219,6 +272,29 @@ copy_section() {
         "K20 UIPasteboard kommt nur in TextClipboard vor" "$clip"
     ban "$bubble" 'textSelection' \
         "K21 die Blase behält das Kontextmenü statt des Systemmenüs"
+
+    # --- F3 (R-CH4): die Prüfung ist privat, die Modifier liegen im enum ----
+    # `private` an einem Typ-Member ist nur innerhalb der Deklaration sichtbar.
+    # Die beiden Modifier müssen deshalb Geschwister von `isCopyable` sein —
+    # stünden sie auf Dateiebene, wäre die Prüfung entweder unerreichbar oder
+    # wieder `fileprivate`.
+    # `grep -F 'private static func …'` waere hier falsch: die Zeichenfolge
+    # steckt auch in `fileprivate static func …`. Beide Muster sind deshalb auf
+    # den Zeilenanfang bzw. eine Nicht-Buchstaben-Grenze verankert; die Probe
+    # »private -> fileprivate« belegt, dass sie den Unterschied sehen.
+    need "$clip" '^[[:space:]]*private[[:space:]]+static[[:space:]]+func[[:space:]]+isCopyable' \
+        "K22a isCopyable ist private, nicht fileprivate (F3)"
+    ban "$clip" '^[[:space:]]*fileprivate[[:space:]]+static[[:space:]]+func[[:space:]]+isCopyable' \
+        "K22b es gibt keine fileprivate Deklaration von isCopyable mehr (F3)"
+    block_has "$clip" 'enum TextClipboard' 'struct CopyableTextModifier: ViewModifier' \
+        "K23a der Kontextmenü-Modifier liegt im enum — sonst ist private unerreichbar (F3)"
+    block_has "$clip" 'enum TextClipboard' 'struct CopyableActionModifier: ViewModifier' \
+        "K23b der Aktions-Modifier liegt im enum — sonst ist private unerreichbar (F3)"
+    # Kontrolle gegen ein ins Leere greifendes Rumpf-Muster: derselbe Schnitt
+    # muss die private Prüfung wirklich enthalten. Die Grenze `[^A-Za-z]` hält
+    # `fileprivate` draußen.
+    block_has "$clip" 'enum TextClipboard' '[^A-Za-z]private[[:space:]]+static[[:space:]]+func[[:space:]]+isCopyable' \
+        "K23c (Kontrolle: der enum-Rumpf enthält die private Prüfung)"
 }
 
 # ---------------------------------------------------------------------------
@@ -337,6 +413,22 @@ approval_section() {
         "F53 die Kopfzeile zeigt den Zustandstext"
     ban "$view" '\.onAppear' \
         "F54 beim Erscheinen wird nichts still ausgeführt"
+
+    # --- F3/F4 (R-CH4): eine Quelle für die Folge, deny endet auch die Karte -
+    # Die Folge ist der beim Empfang gespeicherte `Entry.text` (§3.3.2, C5).
+    # Ein zweiter Zugriff auf `approval.description` in der Karte wäre eine
+    # zweite Quelle für denselben Satz.
+    block_has "$view" 'private func approvalCard(for entry' 'Text\(entry\.text\)' \
+        "F55 die Klartext-Folge liest den gespeicherten entry.text (F3)"
+    block_lacks "$view" 'private func approvalCard(for entry' 'approval\?\.description' \
+        "F56 die Karte greift nicht ein zweites Mal auf approval.description (F3)"
+    block_has "$view" 'private func approvalCard(for entry' 'copyableText\(entry\.text\)' \
+        "F57 die Kopier-Affordanz hängt am selben Text wie die Anzeige (F3)"
+    # F4: `deny` beendet die Freigabe — auf der Karte wie auf den Chips.
+    block_has "$vm" 'if choice == .once' 'toolStatus = \.denied' \
+        "F58 deny setzt die Werkzeugkarte auf .denied (F4)"
+    exactly "$vm" 'toolStatus = \.denied' 1 \
+        "F59 genau eine Stelle setzt .denied — der catch-Zweig nicht (F4)"
 }
 
 # ---------------------------------------------------------------------------
@@ -407,6 +499,15 @@ phase_section() {
         "P23 die Zeile liegt außerhalb des Scrollinhalts"
     ban "$phaseView" 'accessibilityReduceMotion' \
         "P24 es gibt keine Animation, die abzuschalten wäre (dokumentierte Nullaussage)"
+
+    # --- F2 (R-CH4): der Phasenwechsel ist beobachtbar ----------------------
+    # `turnPhase` leitet „verbindet“ aus `streamStarted` ab. Ohne Teilnahme an
+    # `objectWillChange` bleibt die Zeile beim ersten Ereignis stehen, bis ein
+    # anderer Wert das Objekt meldet — genau der unsichtbare Wechsel aus G-CH3.
+    need_fixed "$vm" '@Published private(set) var streamStarted = false' \
+        "P25 streamStarted ist @Published und von außen nur lesbar (F2)"
+    ban "$vm" '^[[:space:]]*private var streamStarted([[:space:]]*=|:)' \
+        "P26 es gibt keine unbeobachtbare Deklaration von streamStarted mehr (F2)"
 }
 
 # ---------------------------------------------------------------------------
@@ -481,6 +582,19 @@ background_section() {
         "B26 die Sperre kennt den Chat nicht"
     section_lacks "$planerapp" 'private var lockScreen' 'private func unlockIfNeeded' 'Chat' \
         "B27 hinter der Sperre steht kein Chat-Inhalt"
+
+    # --- F1 (R-CH4): der Expiration-Handler schließt synchron ab ------------
+    # Geprüft wird der **Rumpf der Closure**, nicht die Datei: `endBackgroundTask`
+    # steht auch in `endBackgroundTaskIfNeeded`, `Task { @MainActor in` auch in
+    # den beiden Beobachtern. Nur der Schnitt über die Klammertiefe trennt
+    # „synchron im Handler“ von „im Hop daneben“.
+    local handler='beginBackgroundTask(withName: "chat-turn")'
+    block_has "$vm" "$handler" 'endBackgroundTaskIfNeeded\(\)' \
+        "B28 die Freigabe steht im Rumpf des Expiration-Handlers (F1)"
+    block_has "$vm" "$handler" 'MainActor\.assumeIsolated' \
+        "B29 der Handler betritt den Main-Actor synchron, ohne Hop (F1)"
+    block_lacks "$vm" "$handler" 'Task(\.[A-Za-z]+)?[[:space:]]*\{' \
+        "B30 kein Task-Hop im Handler — UIKit verlangt die Freigabe vor der Rückkehr (F1)"
 }
 
 # ---------------------------------------------------------------------------
