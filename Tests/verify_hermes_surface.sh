@@ -21,6 +21,11 @@
 #   (6) Die pbxproj enthält keinen ATS-Ausnahme-Schlüssel (MARAAA-98).
 #   (7) Die Diagnose-Doku erklärt die curl-Ausgaben und die zwei zulässigen
 #       Betriebsarten; der Schlüssel wird über `~/.hermes/.env` gelesen.
+#   (7b) Die Doku unterscheidet die zwei 302-Quellen (Cloudflare Access am
+#       Edge vs. Dashboard auf 9119), nennt die Origin-Prüfung mit Host-Header
+#       und den Service-Token-Weg (CF-Access-Client-Id/-Secret, Policy
+#       „Service Auth“). Die frühere Allein-Erklärung „302 = Tunnel zeigt
+#       weiter auf das Dashboard“ ist entfernt.
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen WP-Abnahmen laufen ebenfalls über grep-/Schema-Prüfungen.
@@ -523,7 +528,6 @@ for key in NSAllowsArbitraryLoads NSExceptionDomains NSAllowsLocalNetworking NSA
 done
 
 # --- (7) Dokumentation ----------------------------------------------------
-
 require_fixed "Doku-Abschnitt zu den curl-Ausgaben" \
     '## Was die curl-Ausgaben bedeuten' "$docs"
 require_fixed "Doku-Tabelle mit Aufruf/Antwort/Bedeutung" \
@@ -539,6 +543,89 @@ require_fixed "Doku nennt die irreführende config-Antwort" \
     'Config key not set: API_SERVER_KEY' "$docs"
 require_fixed "Doku warnt vor 0.0.0.0 als Basis-URL" \
     '0.0.0.0` ist keine verbindbare Adresse' "$docs"
+
+# --- (7b) Doku: die zwei 302-Quellen sind unterscheidbar ------------------
+# Ein 302 vor dem Origin kann von Cloudflare Access (Edge) oder vom Dashboard
+# (Port 9119) kommen. Die Doku muss beide nennen; die frühere Allein-
+# erklärung „302 = Tunnel zeigt weiter auf das Dashboard“ ist falsch und
+# schickt den Betreiber nach dem Tunnel-Wechsel in die falsche Richtung.
+
+require_fixed "Doku nennt Cloudflare Access als 302-Quelle" \
+    'cloudflareaccess.com' "$docs"
+require_fixed "Doku nennt die Access-Anmeldung im Location-Header" \
+    'cdn-cgi/access/login' "$docs"
+require_fixed "Doku nennt die Service-Token-Header (Client-ID)" \
+    'CF-Access-Client-Id' "$docs"
+require_fixed "Doku nennt die Service-Token-Header (Client-Secret)" \
+    'CF-Access-Client-Secret' "$docs"
+require_fixed "Doku nennt die Felder der App (Client-ID)" \
+    'CF-Access-Client-ID' "$docs"
+require_fixed "Doku nennt den Service-Token-Status des Meta-JWT" \
+    'service_token_status' "$docs"
+require_fixed "Doku nennt die Origin-Prüfung mit Host-Header" \
+    'Host: <domain>' "$docs"
+require_fixed "Doku nennt die Origin-Prüfung gegen den Proxy" \
+    'http://127.0.0.1:9180/v1/models' "$docs"
+require_fixed "Doku nennt den 302 ohne Token als erwartet" \
+    'kein Tunnel-Fehler' "$docs"
+require_fixed "Doku nennt die App-Meldung zum fehlenden Service-Token" \
+    'Cloudflare Access: Service-Token fehlt oder ungültig.' "$docs"
+require_fixed "Doku nennt die Access-Policy „Service Auth“" \
+    'Service Auth' "$docs"
+require_fixed "Doku verweist auf die Token-Injektion im NetworkClient" \
+    'NetworkClient.swift:310-311' "$docs"
+require_fixed "Doku verweist auf die Fehlermeldung in APIError" \
+    'APIError.swift:194-195' "$docs"
+
+# Die alte Fehlaussage darf nicht mehr als einzige Erklärung stehen.
+forbid_fixed "Doku behauptet 302 nicht mehr allein als Dashboard-Weiterleitung" \
+    'Noch nicht umgestellt — der Tunnel zeigt weiter auf das Dashboard' "$docs"
+forbid_fixed "Doku behauptet 302 nicht mehr pauschal als „Tunnel nicht umgestellt“" \
+    '302` | **Noch nicht umgestellt' "$docs"
+
+tunnel_section="$(section_between '^### Tunnel prüfen' '^## Was der Betreiber noch konfigurieren muss' "$docs")"
+if grep -qF 'cloudflareaccess.com' <<<"$tunnel_section" \
+    && grep -qF '/<domain>/login' <<<"$tunnel_section" \
+    && grep -qiF 'mehrdeutig' <<<"$tunnel_section"; then
+    pass "Tunnel-Abschnitt unterscheidet Access- und Dashboard-302"
+else
+    fail_check "Tunnel-Abschnitt unterscheidet Access- und Dashboard-302"
+fi
+# Der Access-Fall muss den Origin als unbekannt kennzeichnen — sonst klingt
+# „Access“ wie eine Aussage über den Tunnel.
+if grep -qF 'Origin' <<<"$tunnel_section" \
+    && grep -qF 'erreicht den **Origin nie**' <<<"$tunnel_section"; then
+    pass "Access-302 sagt ausdrücklich, dass der Origin nie erreicht wird"
+else
+    fail_check "Access-302 sagt ausdrücklich, dass der Origin nie erreicht wird"
+fi
+if grep -qF 'Prüfungen' <<<"$tunnel_section" \
+    && grep -qF '**a) Am Origin, ohne Access**' <<<"$tunnel_section" \
+    && grep -qF '**b) Öffentlich mit Service-Token**' <<<"$tunnel_section"; then
+    pass "Tunnel-Abschnitt nennt beide belastbaren Prüfungen (a/b)"
+else
+    fail_check "Tunnel-Abschnitt nennt beide belastbaren Prüfungen (a/b)"
+fi
+if grep -qF '**401**' <<<"$tunnel_section" \
+    && grep -qF '**502 / 504**' <<<"$tunnel_section"; then
+    pass "Tunnel-Abschnitt behält 401 als Erfolgsfall und 502/504"
+else
+    fail_check "Tunnel-Abschnitt behält 401 als Erfolgsfall und 502/504"
+fi
+
+operator_section="$(section_between '^## Was der Betreiber noch konfigurieren muss' '^## Grenzen dieser Diagnose' "$docs")"
+if grep -qF 'Service-Token' <<<"$operator_section" \
+    && grep -qF 'CF-Access-Client-Secret' <<<"$operator_section" \
+    && grep -qF 'Service Auth' <<<"$operator_section"; then
+    pass "Betreiber-Abschnitt nennt den Service-Token-Schritt"
+else
+    fail_check "Betreiber-Abschnitt nennt den Service-Token-Schritt"
+fi
+if grep -qF '302' <<<"$operator_section"; then
+    pass "Betreiber-Abschnitt nennt die Folge ohne Service-Token (302)"
+else
+    fail_check "Betreiber-Abschnitt nennt die Folge ohne Service-Token (302)"
+fi
 require_fixed "README verweist auf die Diagnose" \
     'docs/hermes-405-diagnose.md' "$readme"
 require_fixed "README nennt die Status-Auswertung" \

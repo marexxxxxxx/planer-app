@@ -105,7 +105,7 @@ beiden Oberflächen und die Bindungsadresse des API-Servers.
 | `curl http://127.0.0.1:9119/api/status` | `200` | Dashboard-Status; enthält `gateway_platforms.api_server.listener_base` und `state` des API-Servers. |
 | `curl http://127.0.0.1:8642/` | `404: Not Found` | Der API-Server läuft, hat aber keine Route `/`. |
 | `curl http://127.0.0.1:8642/api/status` | `404` | `/api/status` ist eine Dashboard-Route, keine API-Server-Route. |
-| `curl http://192.168.9.2:8642` | `Failed to connect` | Der API-Server bindet nur `127.0.0.1` (Hermes-Default `API_SERVER_HOST`). |
+| `curl http://<lan-ip>:8642` | `Failed to connect` | Der API-Server bindet nur `127.0.0.1` (Hermes-Default `API_SERVER_HOST`). |
 | `curl -H "Authorization: Bearer $API_SERVER_KEY" http://127.0.0.1:8642/v1/models` | `200` | Der API-Server ist gesund; nur der Weg von außen fehlt. |
 
 Die ersten beiden Zeilen sind kein Fehler, sondern der Normalfall: Dashboard
@@ -214,21 +214,73 @@ GET /v1/models              (mit Bearer)   -> 200 {"data":[{"id":"hermes-agent"}
 WS  /api/pty                             -> 403 (Dashboard-Auth), kein 502/504
 ```
 
-### Tunnel prüfen: zeigt die öffentliche URL auf den Proxy?
+### Tunnel prüfen: was antwortet die öffentliche URL?
 
-Ein Statuscode genügt; der Body wird verworfen. Der Aufruf geht bewusst **ohne**
-`Authorization`-Header von außen gegen die öffentliche Adresse:
+Vor dem Origin stehen **zwei** Stellen, die beide mit `302` antworten können:
+**Cloudflare Access** am Edge und das **Dashboard** (Port 9119). Ein Statuscode
+allein ist darum mehrdeutig — er sagt nicht, ob der Tunnel umgestellt ist. Zuerst
+die `Location` der Antwort ansehen:
+
+```
+curl -sSI https://<domain>/v1/models | grep -i '^location:'
+```
+
+| `Location` der 302-Antwort | Quelle | Bedeutung |
+|---|---|---|
+| enthält `cloudflareaccess.com` | **Cloudflare Access** (Edge) | Die Anfrage erreicht den **Origin nie**. Über Tunnel, Proxy und API-Server ist damit **nichts** gesagt — der Origin-Zustand bleibt unbekannt. Prüfbar nur mit Service-Token (b) oder direkt am Origin (a). |
+| endet auf `/<domain>/login` | **Dashboard** (Port 9119) | Der Tunnel zeigt noch auf das Dashboard. Im Tunnel den Dienst auf `http://localhost:9180` ändern. |
+
+Am laufenden Host gemessen: `302` mit
+`location: https://<team>.cloudflareaccess.com/cdn-cgi/access/login/<domain>?…&redirect_url=%2Fv1%2Fmodels`,
+`www-authenticate: Cloudflare-Access`, im Meta-JWT `"service_token_status":false`.
+Dieser 302 **bleibt nach dem Tunnel-Wechsel bestehen** — Access sitzt davor. Er ist
+kein Beleg dafür, dass die Umstellung gescheitert ist.
+
+Der Statuscode allein, ohne jeden Token (Body wird verworfen):
 
 ```
 curl -s -o /dev/null -w '%{http_code}\n' https://<domain>/v1/models
 ```
 
-| Antwort | Bedeutung |
+| Antwort (ohne Bearer, ohne Service-Token) | Bedeutung |
 |---|---|
-| **401** | **Richtig — der Tunnel zeigt auf den Proxy.** Die Anfrage erreicht `hermes-front` (`127.0.0.1:9180`) und von dort den API-Server, der den fehlenden Bearer-Token mit `gateway_auth_failed` abweist. Für diesen Test ist der 401 der **Erfolgsfall**, nicht der Fehlerfall. |
-| **302** | **Noch nicht umgestellt — der Tunnel zeigt weiter auf das Dashboard** (Port 9119) und leitet auf `/login` um. Im Tunnel den Dienst auf `http://localhost:9180` ändern. |
+| **401** | **Erfolgsfall.** Die Anfrage hat Access und den Proxy passiert; der API-Server weist den fehlenden Bearer-Token mit `gateway_auth_failed` ab. |
+| **302** | **Mehrdeutig.** Entweder Cloudflare Access (Edge, `Location` → `cloudflareaccess.com`) **oder** das Dashboard (Port 9119, `Location` → `/<domain>/login`). Ohne die `Location` ist keine Aussage möglich — Tabelle oben. |
 | **200** | Ohne Bearer **nicht zu erwarten**: der API-Server gibt `/v1/models` niemals ohne gültigen Schlüssel frei. Ein 200 an dieser Stelle ist darum kein Beweis für den Proxy, sondern ein Hinweis auf ein anderes Ziel — Ursache prüfen, nicht als Erfolg werten. |
 | **502 / 504** | Der Proxy antwortet, aber sein Upstream fehlt (`hermes-front.service` bzw. Caddyfile prüfen). |
+
+Zwei Prüfungen, die unabhängig von Access eine belastbare Aussage geben:
+
+**a) Am Origin, ohne Access** (funktioniert immer, umgeht Edge und Tunnel):
+
+```
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'Host: <domain>' http://127.0.0.1:9180/v1/models
+```
+
+| Antwort | Bedeutung |
+|---|---|
+| **401** | Der Proxy erreicht den API-Server (fehlender Bearer wird abgewiesen) — Tunnel-Ziel `9180` ist richtig. |
+| **302** | Der Proxy liefert das Dashboard; Caddy-Wegewahl bzw. Upstream prüfen. |
+| **502 / 504** | Caddy bzw. `hermes-front.service` oder dessen Upstream fehlt. |
+
+**b) Öffentlich mit Service-Token** (prüft Access **und** Origin in einem Aufruf):
+
+```
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  https://<domain>/v1/models
+```
+
+**401** = Access, Proxy und API-Server sind in Ordnung. **Ohne** Token ist ein `302`
+auf `cloudflareaccess.com` dagegen **erwartet** und **kein Tunnel-Fehler**.
+
+Die App braucht dasselbe Service-Token in den Einstellungen
+(`CF-Access-Client-ID` / `CF-Access-Client-Secret`); sie sendet es als
+`CF-Access-Client-Id` / `CF-Access-Client-Secret` (`NetworkClient.swift:310-311`).
+Fehlt es, meldet sie „Cloudflare Access: Service-Token fehlt oder ungültig.“
+(`APIError.swift:194-195`) — das ist bereits implementiert, hier ist nichts zu ändern.
 
 Erst danach lohnt der Gegentest **mit** Schlüssel (`grep '^API_SERVER_KEY=' ~/.hermes/.env | cut -d= -f2-`,
 Wert nur in der Kommandozeile, nicht in Dateien): derselbe Aufruf muss dann `200` mit
@@ -239,15 +291,23 @@ Wert nur in der Kommandozeile, nicht in Dateien): derselbe Aufruf muss dann `200
 1. **Cloudflare-Tunnel** (Zero Trust → Tunnel → Public Hostname): Dienst von
    `http://localhost:9119` auf `http://localhost:9180` umstellen. Der alte Wert ist der
    Rückweg; der Proxy selbst lauscht nur auf Loopback, es wird nichts neu veröffentlicht.
-2. **`API_SERVER_KEY`** auslesen
+2. **Service-Token für Cloudflare Access** (Zero Trust → Access → Applications → die
+   Anwendung für `<domain>`): ein Service-Token anlegen, in der Policy eine Regel
+   **„Service Auth“** für dieses Token erlauben (neben dem Browser-Login), und
+   Client-ID/Secret notieren. Ohne diesen Schritt antwortet Access an der Edge weiter
+   mit `302` auf `cloudflareaccess.com` — auch bei korrektem Tunnel, und die App kommt
+   am Origin nie an.
+3. **`API_SERVER_KEY`** auslesen
    (`grep '^API_SERVER_KEY=' ~/.hermes/.env | cut -d= -f2-`) und in der App
    hinterlegen — der Schlüssel gehört in die Keychain, nicht ins Repo und nicht
    in die Proxy-Konfiguration. `hermes config get API_SERVER_KEY --raw` meldet
    `Config key not set: API_SERVER_KEY`, wenn der Wert nur in der `.env` steht.
-3. **In der App:** Hermes-Basis-URL = `https://hermes.example.com` (ohne Pfad), Feld
-   „API-Schlüssel (API-Server)“ ausfüllen. „Test Verbindung“ muss
-   „Verbindung erfolgreich (Hermes-API-Server).“ melden.
-4. Der Password-Login bleibt für die **Dashboard-Oberfläche** im Browser; der API-Server
+4. **In der App:** Hermes-Basis-URL = `https://hermes.example.com` (ohne Pfad), Feld
+   „API-Schlüssel (API-Server)“ ausfüllen, dazu `CF-Access-Client-ID` und
+   `CF-Access-Client-Secret` des Service-Tokens. „Test Verbindung“ muss
+   „Verbindung erfolgreich (Hermes-API-Server).“ melden; ohne Token erscheint
+   stattdessen „Cloudflare Access: Service-Token fehlt oder ungültig.“
+5. Der Password-Login bleibt für die **Dashboard-Oberfläche** im Browser; der API-Server
    kennt ihn nicht. Ein 401 von ihm erscheint in der App als
    „API-Schlüssel fehlt oder ist ungültig (API_SERVER_KEY)“.
 
