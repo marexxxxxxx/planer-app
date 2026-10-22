@@ -116,9 +116,9 @@ Verbindungstest der App aus: Nach einem nicht erfolgreichen `GET /v1/models`
 fragt er für Hermes zusätzlich `GET /api/status` ab und nennt die dort
 gemeldete `listener_base`.
 
-### Zwei zulässige Betriebsarten
+### Drei zulässige Betriebsarten
 
-**(1) Eine URL über hermes-front (empfohlen).** Der Caddy-Proxy lauscht auf
+**(1) Eine URL über hermes-front (eine Adresse für beides).** Der Caddy-Proxy lauscht auf
 `127.0.0.1:9180` und verteilt Dashboard- und API-Verkehr; der Cloudflare-Tunnel
 zeigt auf ihn. In der App steht dann genau eine Adresse:
 
@@ -145,9 +145,32 @@ der Schlüssel nur in `~/.hermes/.env`, antwortet der Befehl mit
 `Config key not set: API_SERVER_KEY` (rc=1). Deshalb den Wert direkt aus der
 `.env` lesen (oben) und nicht in Dateien oder Logs schreiben.
 
+**(3) Eigene API-Domain für den API-Server (empfohlen).** Zwei Public Hostnames am
+selben Tunnel, beide auf den Proxy: die Haupt-Domain bleibt das **Dashboard** für
+Browser und Login, `<api-domain>` ist die **Basis-URL der App**.
+
+```
+Cloudflare Zero Trust → Tunnel → Public Hostname
+  <domain>       →  http://localhost:9180      (Dashboard, Browser-Login)
+  <api-domain>   →  http://localhost:9180      (API-Server)
+
+App-Basis-URL:  https://<api-domain>      (ohne Pfad)
+App:            CF-Access-Client-ID/-Secret + API-Schlüssel (API_SERVER_KEY)
+                Password-Login (Benutzername/Passwort) bleibt leer
+```
+
+Der Proxy unterscheidet nicht an der Domain, sondern am Pfad (siehe unten):
+`/v1/*` und `/api/*` mit `X-Hermes-Client` gehen an den API-Server, `/` und `/login`
+an das Dashboard — für beide Hostnames gleich. Beide liegen hinter derselben
+Access-Anwendung, also gilt für beide dasselbe Service-Token. Der Vorteil dieser
+Variante ist die eigene, stabile Adresse für die App: Sie bleibt unverändert, auch
+wenn an der Haupt-Domain gearbeitet wird, und der Betreiber kann sie unabhängig
+prüfen. Der Password-Login der App wird dabei **nicht** benutzt — der API-Server
+kennt ihn nicht (siehe Beleg 5).
+
 Die App akzeptiert **nur HTTPS** (Ausnahme: `http` auf `localhost`/
 `127.0.0.1`, MARAAA-98). Ein Direktzugriff auf `http://<host>:8642` ist darum
-keine gültige Basis-URL; für Betriebsart (2) braucht der Port eine
+keine gültige Basis-URL; für die Betriebsarten (2) und (3) braucht der Port eine
 TLS-Terminierung (Reverse Proxy oder Tunnel), und die App bekommt deren
 `https://…`-Adresse. `0.0.0.0` ist keine verbindbare Adresse und darf nie als
 Basis-URL eingetragen werden — es beschreibt nur, dass der Listener auf allen
@@ -314,11 +337,41 @@ Erst danach lohnt der Gegentest **mit** Schlüssel (`grep '^API_SERVER_KEY=' ~/.
 Wert nur in der Kommandozeile, nicht in Dateien): derselbe Aufruf muss dann `200` mit
 `{"object":"list","data":[{"id":"hermes-agent",…}]}` liefern.
 
+### Eigene API-Domain: gemessene Antworten
+
+Gemessen gegen `https://<api-domain>` bei Tunnel-Dienst `http://localhost:9180`
+(Betriebsart 3), mit dem vorhandenen Cloudflare-Access-Service-Token:
+
+| Aufruf | Antwort |
+|---|---|
+| ohne CF-Token, beliebiger Pfad | **403** Cloudflare Access (HTML) |
+| `GET /v1/models` mit Token, ohne Bearer | **401** `gateway_auth_failed` |
+| `GET /v1/models` mit Token + Bearer | **200** `{"object":"list","data":[{"id":"hermes-agent"}]}` |
+| `GET /api/sessions?limit=1` mit `X-Hermes-Client: planer` + Bearer | **200** |
+| `GET /api/sessions/{id}` | **200** |
+| `GET /api/sessions/{id}/messages?order=oldest` | **200** (`latest` ebenso; `desc` → **400** `invalid_pagination`) |
+| `POST /api/sessions` `{"source":"desktop"}` | **201** `{"object":"hermes.session","session":{…}}` |
+| `DELETE /api/sessions/{id}` | **200** |
+
+**Unterschied zur Haupt-Domain:** Ohne Token antwortet Access hier mit **403** (HTML),
+nicht mit `302` auf `cloudflareaccess.com`. Ein 403 ohne Token ist darum **kein**
+Tunnel- oder Proxy-Fehler, sondern der erwartete Access-Block — der 302-Fall oben gilt
+für die Haupt-Domain, an der Access auf den Login umleitet.
+
+Betreiber-Hinweis: `GET /api/sessions/{id}/messages` akzeptiert nur
+`order=oldest|latest`; `order=desc` ist ein `400 invalid_pagination`. Die App sendet
+die richtigen Werte (`oldest`/`latest`), nur eigene curl-Aufrufe müssen sie treffen.
+
+Damit ist der Weg vollständig belegt: 401 ohne Bearer, 200 mit Bearer, Sitzungs-CRUD
+mit 200/201 — bei unverändertem Dashboard unter der Haupt-Domain.
+
 ## Was der Betreiber noch konfigurieren muss
 
 1. **Cloudflare-Tunnel** (Zero Trust → Tunnel → Public Hostname): Dienst von
-   `http://localhost:9119` auf `http://localhost:9180` umstellen. Der alte Wert ist der
-   Rückweg; der Proxy selbst lauscht nur auf Loopback, es wird nichts neu veröffentlicht.
+   `http://localhost:9119` auf `http://localhost:9180` umstellen. Für Betriebsart 3
+   zusätzlich einen zweiten Public Hostname `<api-domain>` auf denselben Dienst
+   `http://localhost:9180` legen. Der alte Wert ist der Rückweg; der Proxy selbst
+   lauscht nur auf Loopback, es wird nichts neu veröffentlicht.
 2. **Service-Token für Cloudflare Access** — zuerst **prüfen**, nicht anlegen: Ein
    vorhandenes Service-Token der Domain zuerst prüfen (Prüfung b oben); ein **neues**
    ist nur nötig, wenn die Policy es nicht erlaubt — dann in Zero Trust → Access →
@@ -331,11 +384,13 @@ Wert nur in der Kommandozeile, nicht in Dateien): derselbe Aufruf muss dann `200
    hinterlegen — der Schlüssel gehört in die Keychain, nicht ins Repo und nicht
    in die Proxy-Konfiguration. `hermes config get API_SERVER_KEY --raw` meldet
    `Config key not set: API_SERVER_KEY`, wenn der Wert nur in der `.env` steht.
-4. **In der App:** Hermes-Basis-URL = `https://hermes.example.com` (ohne Pfad), Feld
-   „API-Schlüssel (API-Server)“ ausfüllen, dazu `CF-Access-Client-ID` und
-   `CF-Access-Client-Secret` des Service-Tokens. „Test Verbindung“ muss
-   „Verbindung erfolgreich (Hermes-API-Server).“ melden; ohne Token erscheint
-   stattdessen „Cloudflare Access: Service-Token fehlt oder ungültig.“
+4. **In der App** (Betriebsart 3, empfohlen):
+   - Basis-URL `https://<api-domain>` (ohne Pfad).
+   - `CF-Access-Client-ID` und `CF-Access-Client-Secret` des Service-Tokens.
+   - „API-Schlüssel (API-Server)“ = `API_SERVER_KEY`.
+   - Password-Login-Felder (Benutzername/Passwort) bleiben **leer**.
+   „Test Verbindung“ muss „Verbindung erfolgreich (Hermes-API-Server).“ melden;
+   ohne Token erscheint „Cloudflare Access: Service-Token fehlt oder ungültig.“
 5. Der Password-Login bleibt für die **Dashboard-Oberfläche** im Browser; der API-Server
    kennt ihn nicht. Ein 401 von ihm erscheint in der App als
    „API-Schlüssel fehlt oder ist ungültig (API_SERVER_KEY)“.

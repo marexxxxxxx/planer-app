@@ -19,7 +19,7 @@
 #   (5) `ServiceConfiguration` erlaubt weiterhin nur `https` (Ausnahme:
 #       `http` auf localhost/127.0.0.1) und hat kein pauschales `case "http":`.
 #   (6) Die pbxproj enthält keinen ATS-Ausnahme-Schlüssel (MARAAA-98).
-#   (7) Die Diagnose-Doku erklärt die curl-Ausgaben und die zwei zulässigen
+#   (7) Die Diagnose-Doku erklärt die curl-Ausgaben und die drei zulässigen
 #       Betriebsarten; der Schlüssel wird über `~/.hermes/.env` gelesen.
 #   (7b) Die Doku unterscheidet die zwei 302-Quellen (Cloudflare Access am
 #       Edge vs. Dashboard auf 9119), nennt die Origin-Prüfung mit Host-Header
@@ -31,6 +31,10 @@
 #       Umgebungsvariablen `$CF_ACCESS_CLIENT_ID`/`$CF_ACCESS_CLIENT_SECRET`
 #       und schließt Token-Werte aus. Die frühere Allein-Erklärung „302 =
 #       Tunnel zeigt weiter auf das Dashboard“ ist entfernt.
+#   (7c) Die Doku nennt die dritte Betriebsart (eigene API-Domain
+#       `<api-domain>` am selben Tunnel auf 9180) samt gemessener Antworten:
+#       ohne Token **403** (nicht 302), 401 ohne Bearer, 200 mit Bearer,
+#       Sitzungs-CRUD 200/201, `order=oldest|latest` (`desc` → 400).
 #
 # Warum statisch: Auf diesem Prüfstand gibt es keine Swift-Toolchain; die
 # übrigen WP-Abnahmen laufen ebenfalls über grep-/Schema-Prüfungen.
@@ -685,6 +689,64 @@ if grep -qF 'nur nötig, wenn' <<<"$operator_section" \
     pass "Betreiber-Abschnitt prüft erst das vorhandene Token"
 else
     fail_check "Betreiber-Abschnitt prüft erst das vorhandene Token"
+fi
+
+# --- (7c) Doku: dritte Betriebsart (eigene API-Domain) --------------------
+# Eine zweite Public-Hostname `<api-domain>` am selben Tunnel auf 9180: die
+# Haupt-Domain bleibt Dashboard, die App spricht die API-Domain. Dort ist der
+# Fall ohne Token 403 (Access-Block), nicht 302 wie an der Haupt-Domain.
+
+require_fixed "Doku nennt die dritte Betriebsart" \
+    'Drei zulässige Betriebsarten' "$docs"
+require_fixed "Doku kennzeichnet die eigene API-Domain als empfohlen" \
+    'Eigene API-Domain für den API-Server (empfohlen)' "$docs"
+require_fixed "Doku nutzt den Platzhalter <api-domain>" \
+    '<api-domain>' "$docs"
+require_fixed "Doku nennt die gemessenen Antworten der API-Domain" \
+    '### Eigene API-Domain: gemessene Antworten' "$docs"
+require_fixed "Doku nennt die echte App-Basis-URL der API-Domain" \
+    'https://<api-domain>' "$docs"
+require_fixed "Doku stellt das Password-Login-Feld leer" \
+    'bleiben **leer**' "$docs"
+
+api_section="$(section_between '^### Eigene API-Domain' '^## Was der Betreiber noch konfigurieren muss' "$docs")"
+if grep -qF '**403**' <<<"$api_section" \
+    && grep -qF 'ohne CF-Token' <<<"$api_section" \
+    && grep -qF '302' <<<"$api_section"; then
+    pass "API-Domain: 403 ohne Token ist vom 302 der Haupt-Domain getrennt"
+else
+    fail_check "API-Domain: 403 ohne Token ist vom 302 der Haupt-Domain getrennt"
+fi
+if grep -qF 'Tunnel- oder Proxy-Fehler' <<<"$api_section"; then
+    pass "API-Domain: 403 ohne Token ist ausdrücklich kein Tunnel-Fehler"
+else
+    fail_check "API-Domain: 403 ohne Token ist ausdrücklich kein Tunnel-Fehler"
+fi
+if grep -qF 'GET /v1/models' <<<"$api_section" \
+    && grep -qF '**401**' <<<"$api_section" \
+    && grep -qF 'gateway_auth_failed' <<<"$api_section"; then
+    pass "API-Domain: 401 ohne Bearer ist belegt"
+else
+    fail_check "API-Domain: 401 ohne Bearer ist belegt"
+fi
+if grep -qF 'POST /api/sessions' <<<"$api_section" \
+    && grep -qF '**201**' <<<"$api_section" \
+    && grep -qF 'DELETE /api/sessions/{id}' <<<"$api_section"; then
+    pass "API-Domain: Sitzungs-CRUD mit 201/200 belegt"
+else
+    fail_check "API-Domain: Sitzungs-CRUD mit 201/200 belegt"
+fi
+if grep -qF 'order=oldest' <<<"$api_section" \
+    && grep -qF 'order=oldest|latest' <<<"$api_section" \
+    && grep -qF 'invalid_pagination' <<<"$api_section"; then
+    pass "Doku nennt order=oldest|latest und den 400 bei desc"
+else
+    fail_check "Doku nennt order=oldest|latest und den 400 bei desc"
+fi
+if grep -qF 'X-Hermes-Client: planer' <<<"$api_section"; then
+    pass "API-Domain: Marker-Header ist belegt"
+else
+    fail_check "API-Domain: Marker-Header ist belegt"
 fi
 require_fixed "README verweist auf die Diagnose" \
     'docs/hermes-405-diagnose.md' "$readme"
