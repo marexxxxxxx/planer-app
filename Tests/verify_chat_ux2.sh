@@ -1,0 +1,562 @@
+#!/usr/bin/env bash
+#
+# Statische Abnahme der vier Leistungen aus CH3 (MARAAA-171)
+# (spec-chat Rev 7 Delta §7.2/§7.3, Entscheidungen A1-A7).
+#
+# Geprüft werden Dateien, Symbole, Zeilenreihenfolgen, Aufrufe und Zählungen —
+# keine Swift-Toolchain, keine Kompilierung, kein Netz, kein Aufruf anderer
+# Tests.
+#
+#   bash Tests/verify_chat_ux2.sh [copy|approval|phase|status|background|handover|all]
+#
+# `status` ist der im Auftrag (MARAAA-173) genannte Name des Abschnitts `phase`;
+# beide Wörter wählen dieselbe Prüfung. `phase` ist der Name aus §7.2.
+#
+# Exit-Status: 0 = alle Prüfungen des Abschnitts grün, 1 = mindestens eine rot,
+# 2 = falscher Aufruf. Der Status stammt aus `fail`, nie aus einem `echo`.
+#
+# Die Prüfnummern (K/F/P/B/X) sind die der Testmatrix §7.3. Die dort genannte
+# Probe M1–M20 aus §7.4 macht den zugehörigen Abschnitt rot; die
+# Mutationsmatrix steht im Bericht zu MARAAA-173.
+#
+# Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
+# Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
+# (`approvalTimeout`) und Zeile 68 (`maxNoticeCharacters`, unverändert aus
+# Rev 5). Ein Zähler auf die nackte Zahl wäre gegen den korrekten Baum rot.
+# Geprüft wird deshalb die **Definition** der beiden neuen Zahlen: je genau
+# eine Deklarationszeile (X1a/X1b). Die Nullaussage „keine Magic Number in
+# der Oberfläche“ bleibt unverändert (X2).
+#
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+chat="Planer/Features/Chat"
+vm="$chat/ChatViewModel.swift"
+view="$chat/ChatView.swift"
+cfg="$chat/ChatConfiguration.swift"
+chips="$chat/ToolConfirmationChips.swift"
+card="$chat/ToolCallCard.swift"
+phase="$chat/ApprovalPhase.swift"
+phaseView="$chat/ChatPhaseStatusView.swift"
+api="$chat/HermesChatAPI.swift"
+clip="Planer/DesignSystem/Components/TextClipboard.swift"
+bubble="Planer/DesignSystem/Components/MessageBubbleView.swift"
+planerapp="Planer/App/PlanerApp.swift"
+net="Planer/Networking/NetworkClient.swift"
+
+fail=0
+
+pass() { echo "ok:   $1"; }
+bad()  { echo "FAIL: $1"; fail=1; }
+
+need() { if grep -qE "$2" "$1"; then pass "$3"; else bad "$3  [$1 ~ /$2/]"; fi; }
+need_fixed() { if grep -qF "$2" "$1"; then pass "$3"; else bad "$3  [$1 = $2]"; fi; }
+ban() { if grep -qE "$2" "$1"; then bad "$3  [$1 ~ /$2/]"; else pass "$3"; fi; }
+ban_fixed() { if grep -qF "$2" "$1"; then bad "$3  [$1 = $2]"; else pass "$3"; fi; }
+file_required() { if [[ -f "$1" ]]; then pass "Datei: $1"; else bad "Datei fehlt: $1"; fi; }
+
+# `grep -c` endet bei 0 Treffern mit Status 1; unter `pipefail` darf das den
+# Zähler nicht verfälschen. Deshalb erst den Status schlucken, dann zählen.
+count_matches() {
+    local n
+    n="$(grep -cE "$2" "$1" 2>/dev/null || true)"
+    echo "${n:-0}" | tr -d ' '
+}
+
+at_least() {
+    local file="$1" pattern="$2" min="$3" label="$4" n
+    n="$(count_matches "$file" "$pattern")"
+    if [[ "$n" -ge "$min" ]]; then
+        pass "$label (Treffer: $n)"
+    else
+        bad "$label (Treffer: $n, erwartet: >= $min)  [$file ~ /$pattern/]"
+    fi
+}
+
+exactly() {
+    local file="$1" pattern="$2" want="$3" label="$4" n
+    n="$(count_matches "$file" "$pattern")"
+    if [[ "$n" -eq "$want" ]]; then
+        pass "$label (Treffer: $n)"
+    else
+        bad "$label (Treffer: $n, erwartet: $want)  [$file ~ /$pattern/]"
+    fi
+}
+
+# Abschnitt einer Datei: von der Zeile, die $2 enthält, bis zur ersten Zeile,
+# die $3 enthält (beide Grenzen eingeschlossen). Grenzen sind **wörtlich** und
+# werden mit index() verglichen — ein Regex würde bei jedem `\(` in awk
+# warnen und die Grenze unschärfer machen.
+section() {
+    awk -v s="$2" -v e="$3" '!f && index($0, s) > 0 { f=1 } f { print; if (index($0, e) > 0) exit }' "$1"
+}
+
+# Abschnitt erst in eine Variable, dann prüfen. `section ... | grep -q` ist
+# unter `pipefail` nicht deterministisch: beendet `grep -q` nach dem ersten
+# Treffer, bekommt `awk` beim nächsten Schreibblock SIGPIPE (Status 141) und
+# die Pipeline gilt als rot, obwohl der Treffer da war. Die Zwischenvariable
+# nimmt den SIGPIPE aus dem Spiel.
+section_has() {
+    local file="$1" start="$2" end="$3" pattern="$4" label="$5" body
+    body="$(section "$file" "$start" "$end")"
+    if grep -qE "$pattern" <<<"$body"; then
+        pass "$label"
+    else
+        bad "$label  [$file, Abschnitt /$start/../$end/ ~ /$pattern/]"
+    fi
+}
+
+section_lacks() {
+    local file="$1" start="$2" end="$3" pattern="$4" label="$5" body
+    body="$(section "$file" "$start" "$end")"
+    if grep -qE "$pattern" <<<"$body"; then
+        bad "$label  [$file, Abschnitt /$start/../$end/ ~ /$pattern/]"
+    else
+        pass "$label"
+    fi
+}
+
+# Reihenfolge zweier wörtlicher Marken **innerhalb** eines Abschnitts: grün
+# nur, wenn beide vorkommen und $5 nach $4 steht. Genau das unterscheidet
+# „Zustand vor dem Aufruf gesetzt“ von „irgendwo im Rumpf erwähnt“.
+section_order() {
+    local file="$1" start="$2" end="$3" first="$4" second="$5" label="$6" body
+    body="$(section "$file" "$start" "$end")"
+    if awk -v a="$first" -v b="$second" '
+        index($0, a) > 0 && !ia { ia = NR }
+        index($0, b) > 0 && !ib { ib = NR }
+        END { exit !(ia && ib && ib > ia) }' <<<"$body"; then
+        pass "$label"
+    else
+        bad "$label  [$file, Abschnitt /$start/../$end/: »$first« muss vor »$second« stehen]"
+    fi
+}
+
+# Muster kommt unter `Planer/` vor, aber in keiner der genannten Dateien.
+# Die ausgeschlossenen Pfade werden **wörtlich** samt `:` gefiltert, damit
+# kein Regex-Zeichen im Pfad (Punkt, Klammer) die Grenze verschiebt.
+ban_outside() {
+    local pattern="$1" label="$2"
+    shift 2
+    local hits ex
+    hits="$(grep -rInE "$pattern" Planer/ --include='*.swift' 2>/dev/null || true)"
+    for ex in "$@"; do
+        hits="$(grep -vF "$ex:" <<<"$hits" || true)"
+    done
+    if [[ -z "${hits//[[:space:]]/}" ]]; then
+        pass "$label"
+    else
+        bad "$label  [Treffer außerhalb: $(head -1 <<<"$hits")]"
+    fi
+}
+
+# Muster steht **in** $1 und nirgends sonst unter `Planer/` — die schärfere
+# Form von „genau eine Stelle“: Vorhandensein und Ausschließlichkeit in einem.
+need_outside() {
+    local file="$1" pattern="$2" label="$3"
+    need "$file" "$pattern" "$label (vorhanden)"
+    ban_outside "$pattern" "$label (nur hier)" "$file"
+}
+
+ban_tree() {
+    local pattern="$1" label="$2" dir="${3:-$chat}" hits
+    hits="$(grep -rInE "$pattern" "$dir" --include='*.swift' 2>/dev/null | wc -l | tr -d ' ' || true)"
+    if [[ "${hits:-0}" -eq 0 ]]; then
+        pass "$label"
+    else
+        bad "$label (Treffer: $hits)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# (a) Kopieren — §7.3.1, K1–K21
+# ---------------------------------------------------------------------------
+copy_section() {
+    echo "--- (a) Kopieren: eine Stelle, kein Netz, leerer Text ohne Aktion"
+
+    file_required "$clip"
+    need "$clip" 'enum TextClipboard' \
+        "K2  TextClipboard ist der benannte Ort der Zwischenablage"
+    need "$clip" 'static func copy\(_ text: String\?\) -> Bool' \
+        "K3  copy nimmt optionalen Text und meldet Erfolg"
+    need_fixed "$clip" 'UIPasteboard.general.string = trimmed' \
+        "K4  geschrieben wird der getrimmte Text"
+    exactly "$clip" 'UIPasteboard' 1 \
+        "K5  genau ein Zugriff auf die Zwischenablage in der Datei"
+    need_fixed "$clip" 'guard isCopyable(text), let text else { return false }' \
+        "K6  der Riegel steht vor dem Schreiben"
+    need "$clip" 'return !text\.trimmingCharacters\(in: \.whitespacesAndNewlines\)\.isEmpty' \
+        "K6b isCopyable misst den getrimmten Text, nicht den rohen"
+    at_least "$clip" 'trimmingCharacters\(in: \.whitespacesAndNewlines\)' 2 \
+        "K7  getrimmt wird an beiden Stellen (Riegel und Schreiben)"
+    need_fixed "$clip" 'static let announcement = "Kopiert"' \
+        "K8  die Ansage steht wörtlich"
+    need "$clip" 'AccessibilityNotification\.Announcement\(TextClipboard\.announcement\)\.post\(\)' \
+        "K9  die Ansage wird nach dem Schreiben gepostet"
+    need "$clip" 'func copyableText\(_ text: String\?\) -> some View' \
+        "K10 copyableText ist ein View-Modifier"
+    need "$clip" 'func copyableAction\(_ text: String\?\) -> some View' \
+        "K11 copyableAction ist ein View-Modifier (ohne Kontextmenü)"
+    need_fixed "$clip" 'Button("Kopieren")' \
+        "K12 der Kontextmenü-Eintrag heißt „Kopieren“"
+    at_least "$clip" '\.accessibilityAction\(named: Text\("Kopieren"\)\)' 2 \
+        "K13 beide Modifier tragen die benannte VoiceOver-Aktion"
+    ban "$clip" 'URLSession|NetworkClient|HermesChatAPI' \
+        "K14 Kopieren ist lokal — kein Netzwerkpfad in der Datei"
+    need_fixed "$bubble" '.copyableText(text)' \
+        "K15 die Blase hängt die Kopier-Affordanz an ihren Text"
+    section_order "$bubble" 'var body' '#Preview' '.accessibilityLabel' '.copyableText(text)' \
+        "K16 das Label steht vor der Kopier-Affordanz (VoiceOver liest den Text)"
+    need_fixed "$view" '.copyableAction(entry.approval?.command)' \
+        "K17 der Befehl der Freigabe ist kopierbar"
+    need_fixed "$view" 'Button("Befehl kopieren")' \
+        "K18 der Befehl hat einen eigenen Kopier-Knopf"
+    need_fixed "$card" '.copyableAction(value)' \
+        "K19 Werkzeug-Argumente und -Ergebnis sind kopierbar"
+    ban_outside 'UIPasteboard' \
+        "K20 UIPasteboard kommt nur in TextClipboard vor" "$clip"
+    ban "$bubble" 'textSelection' \
+        "K21 die Blase behält das Kontextmenü statt des Systemmenüs"
+}
+
+# ---------------------------------------------------------------------------
+# (b) Befehls-Freigabe — §7.3.2, F1–F54
+# ---------------------------------------------------------------------------
+approval_section() {
+    echo "--- (b) Befehls-Freigabe: sechs Zustände, zwei Choices, ein POST"
+
+    file_required "$phase"
+    need_fixed "$phase" 'enum ApprovalPhase: Equatable, Sendable' \
+        "F2  ApprovalPhase ist der benannte Zustand"
+    exactly "$phase" '^ *case (open|sending|executed|denied|expired|conflict)$' 6 \
+        "F3  genau sechs Zustände, keine mehr"
+    need_fixed "$phase" 'case .open: return "Offen"' \
+        "F4  Text „Offen“ wörtlich"
+    need_fixed "$phase" 'case .sending: return "Wird gesendet …"' \
+        "F5  Text „Wird gesendet …“ wörtlich"
+    need_fixed "$phase" 'case .executed: return "Ausgeführt"' \
+        "F6  Text „Ausgeführt“ wörtlich"
+    need_fixed "$phase" 'case .denied: return "Abgelehnt"' \
+        "F7  Text „Abgelehnt“ wörtlich"
+    need_fixed "$phase" 'case .expired: return "Abgelaufen"' \
+        "F8  Text „Abgelaufen“ wörtlich"
+    need_fixed "$phase" 'case .conflict: return "Nicht mehr aktiv"' \
+        "F9  Text „Nicht mehr aktiv“ wörtlich"
+    need_fixed "$phase" 'var acceptsDecision: Bool { self == .open }' \
+        "F10 nur aus .open darf entschieden werden"
+    need "$phase" 'var waitsForUser: Bool' \
+        "F11 waitsForUser ist ein eigener Begriff"
+    need_fixed "$phase" 'static func derive(stored: ApprovalPhase, receivedAt: Date?, timeout: TimeInterval, now: Date) -> ApprovalPhase' \
+        "F12 die Frist wird abgeleitet, nicht gespeichert"
+    need "$phase" 'return \.expired' \
+        "F13 die Ableitung kennt den Ablauf"
+    need_fixed "$cfg" 'var approvalTimeout: TimeInterval = 300' \
+        "F14 die Frist ist konfiguriert (300 s)"
+    need_fixed "$cfg" 'var maxCommandCharacters = 12_000' \
+        "F15 die Befehls-Obergrenze ist konfiguriert (12 000)"
+    ban "$view" 'lineLimit\(3\)' \
+        "F16 der Befehl wird vollständig gerendert (A1)"
+    need "$view" 'confirmationDialog\(' \
+        "F17 die Bestätigung ist ein Dialog"
+    need_fixed "$view" 'Button("Ausführen", role: .destructive)' \
+        "F18 der Ausführen-Knopf ist als destruktiv markiert"
+    need_fixed "$view" 'Button("Abbrechen", role: .cancel)' \
+        "F19 der Abbrechen-Knopf ist der Cancel-Knopf"
+    need "$view" 'titleVisibility: \.visible' \
+        "F20 der Dialogtitel ist sichtbar"
+    need "$view" 'approvalCommand\(for:' \
+        "F21 der Dialog zeigt den vollständigen Befehl als message"
+    need "$view" 'Text\(approval\.runID\)' \
+        "F22 die Run-ID steht als Text auf der Karte"
+    need "$view" 'truncationMode\(\.middle\)' \
+        "F23 die Run-ID wird mittig gekürzt"
+    need_fixed "$view" 'vom Server nicht benannt' \
+        "F24 fehlender Werkzeugname hat einen Text"
+    need_fixed "$view" 'Keine Beschreibung vom Server.' \
+        "F25 fehlende Beschreibung hat einen Text"
+    need "$view" 'approvalTimeoutSeconds' \
+        "F26 die Frist steht als Hinweis in der Oberfläche"
+    need "$view" 'TimelineView\(\.periodic\(from:' \
+        "F27 die Karte rechnet den Ablauf ohne Nutzeraktion nach"
+    ban "$view" 'approveSession|"session"' \
+        "F28 „session“ wird nie als Choice angeboten"
+    need_fixed "$chips" 'let phase: ApprovalPhase' \
+        "F29 die Chips lesen den benannten Zustand"
+    need_fixed "$chips" 'let allowsExecute: Bool' \
+        "F30 die Chips kennen die Ausführbarkeit"
+    need_fixed "$chips" 'let onRequestExecute: () -> Void' \
+        "F31 die Chips fragen die Ausführung an, statt sie zu tun"
+    need "$chips" 'canApproveOnce' \
+        "F32a der Server-Riegel canApproveOnce ist beachtet"
+    need "$chips" 'canDeny' \
+        "F32b der Server-Riegel canDeny ist beachtet"
+    need_fixed "$chips" 'Keine ausführbare Auswahl.' \
+        "F33 ohne Choice steht ein Text statt eines leeren Bereichs"
+    need_fixed "$vm" 'var approvalPhase: ApprovalPhase = .open' \
+        "F34 der gespeicherte Startzustand ist .open"
+    need_fixed "$vm" 'var approvalReceivedAt: Date?' \
+        "F35 die Empfangszeit ist optional gespeichert"
+    need_fixed "$vm" 'var approvalToolName: String?' \
+        "F36 der Werkzeugname ist optional gespeichert"
+    need_fixed "$vm" 'var approvalCommandTooLong: Bool = false' \
+        "F37 die Obergrenze ist als Merker gespeichert"
+    need_fixed "$vm" 'var approvalResolved: Bool { !approvalPhase.waitsForUser }' \
+        "F38 „erledigt“ ist berechnet, nicht gesetzt"
+    ban "$vm" 'approvalResolved: Bool = false' \
+        "F39 es gibt keinen gespeicherten Erledigt-Zustand mehr"
+    need_fixed "$vm" 'entries[current].approvalPhase = .conflict' \
+        "F40 der Server-Konflikt hat einen eigenen Zustand"
+    section_lacks "$vm" '        catch {' '// MARK: Ablauf' '\.denied' \
+        "F41 der Fehlerzweig behauptet nie „abgelehnt“"
+    section_has "$vm" '        catch {' '// MARK: Ablauf' '\.conflict' \
+        "F42 der Fehlerzweig setzt den Konflikt"
+    need_fixed "$vm" '"Freigabe nicht mehr aktiv."' \
+        "F43 die Konfliktmeldung ist wörtlich (Rev 5 F14)"
+    need_fixed "$vm" 'decidingApprovalEntryID == nil' \
+        "F44 der Doppel-Tipp-Riegel steht im Riegel"
+    section_order "$vm" 'func decideApproval(' 'try await api.respondToApproval' \
+        '.sending' 'try await api.respondToApproval' \
+        "F45 .sending steht vor dem await (sichtbarer Zwischenzustand)"
+    exactly "$api" 'func respondToApproval' 1 \
+        "F46 genau eine API-Methode für die Antwort"
+    ban_outside 'respondToApproval' \
+        "F47 respondToApproval wird nur von API und ViewModel genannt" "$api" "$vm"
+    exactly "$view" 'decideApproval\(' 2 \
+        "F48 genau zwei Aufrufstellen (einmal pro Choice)"
+    exactly "$view" 'choice: \.once' 1 \
+        "F49 genau ein once-Aufruf"
+    exactly "$view" 'choice: \.deny' 1 \
+        "F50 genau ein deny-Aufruf"
+    need_fixed "$vm" 'func approvalCommand(for entryID: UUID) -> String?' \
+        "F51 der Dialogtext kommt unverkürzt aus dem Modell"
+    need_fixed "$vm" 'var approvalTimeoutSeconds: Int' \
+        "F52 die Frist gelangt als Int in die View"
+    need "$view" 'approvalPhase\.label' \
+        "F53 die Kopfzeile zeigt den Zustandstext"
+    ban "$view" '\.onAppear' \
+        "F54 beim Erscheinen wird nichts still ausgeführt"
+}
+
+# ---------------------------------------------------------------------------
+# (c) Live-Status — §7.3.3, P1–P24
+# ---------------------------------------------------------------------------
+phase_section() {
+    echo "--- (c) Live-Status: fünf Phasen, abgeleitet, ohne Animation"
+
+    file_required "$phaseView"
+    need_fixed "$phaseView" 'enum ChatTurnPhase: Equatable, Sendable' \
+        "P2  ChatTurnPhase ist der benannte Phasenzustand"
+    need_fixed "$phaseView" 'case connecting' "P3a Phase „verbindet“"
+    need_fixed "$phaseView" 'case thinking' "P3b Phase „denkt nach“"
+    need_fixed "$phaseView" 'case awaitingApproval' "P3c Phase „wartet auf Freigabe“"
+    need_fixed "$phaseView" 'case writing' "P3d Phase „schreibt“"
+    need_fixed "$phaseView" 'case tool(name: String)' \
+        "P4  die Werkzeugphase trägt den Werkzeugnamen"
+    need_fixed "$phaseView" 'case .connecting: return "Verbindet …"' \
+        "P5  Text „Verbindet …“ wörtlich"
+    need_fixed "$phaseView" 'case .thinking: return "Denkt nach …"' \
+        "P6  Text „Denkt nach …“ wörtlich"
+    need "$phaseView" 'case \.tool\(let name\): return "Werkzeug \\\(name\)"' \
+        "P7  Text „Werkzeug <Name>“ wörtlich"
+    need_fixed "$phaseView" 'case .awaitingApproval: return "Wartet auf Freigabe …"' \
+        "P8  Text „Wartet auf Freigabe …“ wörtlich"
+    need_fixed "$phaseView" 'case .writing: return "Schreibt …"' \
+        "P9  Text „Schreibt …“ wörtlich"
+    need_fixed "$phaseView" 'struct ChatPhaseStatusView: View' \
+        "P10 die Zeile ist eine eigene View"
+    need_fixed "$phaseView" 'init(phase: ChatTurnPhase)' \
+        "P11 die View nimmt genau die Phase"
+    need "$phaseView" '\.accessibilityElement\(children: \.ignore\)' \
+        "P12 die Zeile ist ein Element, kein Textstückwerk"
+    need "$phaseView" '\.accessibilityLabel\(Text\("Status: \\\(phase\.title\)"\)\)' \
+        "P13 die Zeile hat ein eigenes Label"
+    ban "$phaseView" 'withAnimation|\.transition\(|\.id\(' \
+        "P14 kein animierter Wechsel, kein Flackern"
+    need "$vm" 'var turnPhase: ChatTurnPhase\?' \
+        "P15 die Phase ist ein optionaler, berechneter Wert"
+    section_order "$vm" 'var turnPhase' 'var showsWorkingIndicator' \
+        'return .awaitingApproval' 'return .tool(name:' \
+        "P16a Freigabe hat Vorrang vor dem Werkzeug"
+    section_order "$vm" 'var turnPhase' 'var showsWorkingIndicator' \
+        'return .tool(name:' 'return .writing' \
+        "P16b Werkzeug hat Vorrang vor dem Schreiben"
+    section_order "$vm" 'var turnPhase' 'var showsWorkingIndicator' \
+        'return .writing' 'return .connecting' \
+        "P16c Schreiben hat Vorrang vor dem Verbinden"
+    section_order "$vm" 'var turnPhase' 'var showsWorkingIndicator' \
+        'return .awaitingApproval' 'return .writing' \
+        "P16d Freigabe hat auch Vorrang vor dem Schreiben"
+    section_has "$vm" 'var turnPhase' 'var showsWorkingIndicator' \
+        'guard isStreaming else \{ return nil \}' \
+        "P17 außerhalb eines Turns gibt es keine Phase"
+    section_has "$vm" 'var turnPhase' 'var showsWorkingIndicator' 'streamStarted' \
+        "P18 „verbindet“ hängt am ersten Ereignis, nicht an der Uhr"
+    need "$vm" 'var showsWorkingIndicator: Bool' \
+        "P19 die Arbeits-Animation bleibt unverändert vorhanden (O5)"
+    need_fixed "$view" 'ChatPhaseStatusView(phase: phase)' \
+        "P20 die Zeile wird mit der Phase gerendert"
+    need "$view" 'if let phase = viewModel\.turnPhase' \
+        "P21 gerendert wird nur eine vorhandene Phase"
+    need_fixed "$view" 'private var phaseBar: some View' \
+        "P21b die Zeile hat einen eigenen Platz im Baum"
+    section_order "$view" 'var body: some View' 'private var statusBar' 'statusBar' 'phaseBar' \
+        "P22 die Phasen-Zeile steht im Statusbereich"
+    section_lacks "$view" 'private var transcript' '// MARK: Eingabe' 'ChatPhaseStatusView' \
+        "P23 die Zeile liegt außerhalb des Scrollinhalts"
+    ban "$phaseView" 'accessibilityReduceMotion' \
+        "P24 es gibt keine Animation, die abzuschalten wäre (dokumentierte Nullaussage)"
+}
+
+# ---------------------------------------------------------------------------
+# (d) Hintergrund — §7.3.4, B1–B27
+# ---------------------------------------------------------------------------
+background_section() {
+    echo "--- (d) Hintergrund: ein Modell, ein Task, eine Reconciliation"
+
+    need_fixed "$vm" 'static let shared = ChatViewModel()' \
+        "B1  es gibt genau eine Instanz je Prozess"
+    need_fixed "$view" '@ObservedObject private var viewModel = ChatViewModel.shared' \
+        "B2  die View beobachtet das geteilte Modell"
+    ban "$view" '@StateObject private var viewModel' \
+        "B3  die View erzeugt das Modell nicht mehr (A6)"
+    need "$vm" 'UIApplication\.didEnterBackgroundNotification' \
+        "B4  der Hintergrund-Wechsel wird beobachtet"
+    need "$vm" 'UIApplication\.willEnterForegroundNotification' \
+        "B5  die Rückkehr wird beobachtet"
+    at_least "$vm" 'Task \{ @MainActor in' 2 \
+        "B6  je Beobachter ein Hop auf den Main-Actor"
+    need_outside "$vm" 'UIApplication\.shared\.beginBackgroundTask\(withName: "chat-turn"\)' \
+        "B7  genau eine Stelle bittet iOS um Zeit"
+    need_fixed "$vm" 'UIApplication.shared.endBackgroundTask(backgroundTask)' \
+        "B8  die Aufgabe wird wieder freigegeben"
+    need_fixed "$vm" 'guard backgroundTask == .invalid else { return }' \
+        "B9  der Start ist genau-einmal (Riegel)"
+    need_fixed "$vm" 'guard backgroundTask != .invalid else { return }' \
+        "B10 das Ende ist idempotent (Riegel)"
+    need_fixed "$vm" 'static let backgroundResumeNotice = "Der Chat war im Hintergrund. Der Verlauf wurde vom Server neu geladen."' \
+        "B11 der Hinweis ist wörtlich (A7)"
+    need "$vm" 'func reconcileAfterBackground\(\) async' \
+        "B12 die Rückkehr hat einen benannten Pfad"
+    section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
+        'await openSession\(session\)' \
+        "B13 nachgeladen wird über den vorhandenen Verlaufspfad"
+    section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
+        'guard !isStreaming else \{ return \}' \
+        "B14 ein lebender Strom gewinnt gegen die Reconciliation (E15)"
+    section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
+        'if notice == nil' \
+        "B15 der Hintergrund-Hinweis überschreibt keine Fehlermeldung"
+    section_has "$vm" 'func handleDidEnterBackground' 'func handleWillEnterForeground' \
+        'beginBackgroundTaskIfNeeded\(\)' \
+        "B16 der Hintergrund-Wechsel startet die Aufgabe"
+    section_order "$vm" 'func handleWillEnterForeground' 'func reconcileAfterBackground' \
+        'endBackgroundTaskIfNeeded()' 'reconcileAfterBackground()' \
+        "B17 die Aufgabe wird beendet, bevor nachgeladen wird"
+    need "$vm" 'private func registerLifecycleObservers\(\)' \
+        "B18a die Beobachter werden registriert"
+    section_has "$vm" 'self.provider = providerFactory' 'deinit' 'registerLifecycleObservers\(\)' \
+        "B18b die Registrierung passiert im init"
+    need_fixed "$vm" 'import UIKit' \
+        "B19 das Modell darf UIKit kennen"
+    need_fixed "$vm" 'private var backgroundTask: UIBackgroundTaskIdentifier = .invalid' \
+        "B20 die Aufgabe startet als ungültig (kein Task)"
+    need_fixed "$vm" 'private var resumeAfterBackground = false' \
+        "B21 der Merker startet aus"
+    ban_outside 'URLSessionConfiguration\.background' \
+        "B22 keine Background-URLSession (kein unbegrenztes Streaming)"
+    ban_outside 'BGTaskScheduler|beginBackgroundTask' \
+        "B23 genau eine Stelle kennt die Hintergrund-Aufgabe" "$vm"
+    need_fixed "$planerapp" 'isUnlocked = false' \
+        "B24a die App-Sperre bleibt wirksam (Zuweisung vorhanden)"
+    # B24b prüft die **Stelle**: die Sperre wird im Hintergrund-Zweig gesetzt,
+    # nicht irgendwo in der Datei. Die Deklaration `@State … = false` in B24a
+    # allein wäre grün, auch wenn der Hintergrund-Zweig nichts mehr täte.
+    section_has "$planerapp" 'case .background:' 'case .active:' 'isUnlocked = false' \
+        "B24b gesperrt wird beim Wechsel in den Hintergrund"
+    need_fixed "$planerapp" 'Planer ist gesperrt' \
+        "B25 der Sperrtext ist unverändert"
+    ban "$planerapp" 'ChatViewModel|MessageBubbleView|ChatView' \
+        "B26 die Sperre kennt den Chat nicht"
+    section_lacks "$planerapp" 'private var lockScreen' 'private func unlockIfNeeded' 'Chat' \
+        "B27 hinter der Sperre steht kein Chat-Inhalt"
+}
+
+# ---------------------------------------------------------------------------
+# (e) Querschnitt — §7.3.5, X1–X11
+# ---------------------------------------------------------------------------
+handover_section() {
+    echo "--- (e) Querschnitt: keine Magic Number, Zusagen aus Rev 5/6 unberührt"
+
+    # X1: §7.3 zählt die nackte Zahl; `300` steht am Ist-Code auch in
+    # `maxNoticeCharacters` (Zeile 68, unverändert aus Rev 5). Geprüft wird
+    # deshalb die Deklaration der beiden neuen Werte.
+    exactly "$cfg" 'var approvalTimeout: TimeInterval = 300' 1 \
+        "X1a die 300 steht genau einmal, als Freigabe-Frist"
+    exactly "$cfg" 'var maxCommandCharacters = 12_000' 1 \
+        "X1b die 12 000 steht genau einmal, als Befehls-Obergrenze"
+    ban "$view" '\b300\b|12_000' \
+        "X2a keine Magic Number in der View"
+    ban "$chips" '\b300\b|12_000' \
+        "X2b keine Magic Number in den Chips"
+    ban "$phase" '\b300\b|12_000' \
+        "X2c keine Magic Number im Freigabe-Zustand"
+    # X2d ist die Kontrolle gegen ein ins Leere greifendes Ban-Muster: genau
+    # dasselbe Muster muss in der erlaubten Datei treffen.
+    need "$cfg" '\b300\b' \
+        "X2d (Kontrolle: das Ban-Muster X2a-c trifft in der erlaubten Datei — es ist nicht leer)"
+    section_has "$vm" 'func decideApproval(' 'switch choice' 'refreshConfiguration\(\)' \
+        "X3  der Freigabe-Pfad liest die aktuelle Konfiguration"
+    need "$vm" 'var showsWorkingIndicator: Bool' \
+        "X4a die Arbeits-Animation ist noch da (O5)"
+    section_has "$vm" 'var showsWorkingIndicator' '// MARK: Verlauf neu laden' \
+        'toolStatus == \.running' \
+        "X4b laufende Werkzeuge zeigen die Animation"
+    section_has "$vm" 'var showsWorkingIndicator' '// MARK: Verlauf neu laden' \
+        'return lastAgent\.text\.isEmpty' \
+        "X4c ohne Agent-Text zeigt sie die Animation"
+    need_fixed "$vm" '@Published private(set) var decidingApprovalEntryID: UUID?' \
+        "X5  der laufende POST ist von außen nur lesbar"
+    need "$vm" 'var turnStartedAt: Date\?' \
+        "X6a die Startzeit des Turns ist optional"
+    at_least "$vm" 'turnStartedAt = nil' 2 \
+        "X6b die Startzeit wird an jedem Turn-Ende gelöscht"
+    need_fixed "$net" 'let session = service == .hermes ? streamingSession : urlSession(for: service)' \
+        "X7  der Strom nutzt weiter die Streaming-Session (O2)"
+    need "$vm" 'try await api\.probeProfile\(\)' \
+        "X8  der Profil-Test bleibt im Modell (O7)"
+    exactly "$planerapp" '\.preferredColorScheme\(appearance\.colorScheme\)' 1 \
+        "X9  die Erscheinungsbild-Wahl bleibt genau einmal (O6)"
+    need "$cfg" 'var approvalPath' \
+        "X10a der Freigabe-Pfad ist benannt"
+    need "$cfg" 'func scoped' \
+        "X10b der Pfad wird gescoped"
+    ban_tree 'ToolCallPolicy|ToolCallConfirmation|MCPClient|callTool' \
+        "X11 kein MCP-Lebenszyklus im Chat (Rev 5 §3.4)" "$chat"
+}
+
+case "${1:-all}" in
+    copy)       copy_section ;;
+    approval)   approval_section ;;
+    phase|status) phase_section ;;
+    background) background_section ;;
+    handover)   handover_section ;;
+    all)
+        copy_section
+        approval_section
+        phase_section
+        background_section
+        handover_section
+        ;;
+    *)
+        echo "Aufruf: $0 [copy|approval|phase|status|background|handover|all]"
+        exit 2
+        ;;
+esac
+
+if [[ "$fail" -ne 0 ]]; then
+    echo "Ergebnis: FEHLGESCHLAGEN (chat-ux2)"
+    exit 1
+fi
+echo "Ergebnis: OK (chat-ux2)"
