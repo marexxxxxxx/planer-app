@@ -70,7 +70,7 @@
 # Mutation rot belegt. B42 gilt nur noch für eine **entscheidbare** Freigabe
 # (`.open`/`acceptsDecision`); `.expired` endet im Abbruch-Pfad mit eigenem
 # Wortlaut (`backgroundApprovalExpiredNotice`). B31 pinnt den beschlossenen
-# Wert 12 s statt eines Bereichs.
+# Wert exakt statt eines Bereichs (Runde 3: 12 s).
 #
 # Nachtrag Runde 4 (MARAAA-188, Review-Befunde W1–W4): B49a–B49e schließen die
 # letzten unbewachten Stellen der A1-Verdrahtung. Geprüft wird der **Aufruf**
@@ -80,6 +80,11 @@
 # waitForTurnStop()` (W3) und der erneute Generationsriegel nach dem
 # Nachladen, bevor Text und Wiederholweg geschrieben werden (W4). Die
 # Mutationsmatrix steht im Bericht zu MARAAA-188 Runde 4.
+#
+# Nachtrag R-CH11 (MARAAA-196, Entscheidung MARAAA-193): B31 pinnt jetzt den
+# exakten Wert 25 s (10-s-Keepalive × 2 + Reserve) statt 12 s; B48i/B48j
+# binden weiterhin die Verwendungsstelle. Rot-Beleg: `= 12` in
+# `ChatConfiguration.swift` ⇒ B31 rot.
 #
 # Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
 # Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
@@ -660,10 +665,11 @@ background_section() {
     # `URLSession`-Request lebt bis `streamIdleTimeout` (Default 900 s) weiter.
     # Ohne Schonfrist bliebe `isStreaming` true und der Composer gesperrt —
     # genau der Nutzerbericht „ich muss die App neu starten“.
-    # B31: der beschlossene Wert ist 12 s — exakt gepinnt, nicht als Bereich.
-    # Eine Änderung auf 5 s (oder jeden anderen Wert) ist rot (V3f).
-    need_fixed "$cfg" 'var backgroundResumeGracePeriod: TimeInterval = 12' \
-        "B31 die Schonfrist ist exakt 12 s"
+    # B31: der beschlossene Wert ist 25 s — exakt gepinnt, nicht als Bereich
+    # (MARAAA-193: 10-s-Keepalive × 2 + Reserve, Folgeauftrag MARAAA-196).
+    # Eine Änderung auf 12 s (oder jeden anderen Wert) ist rot (V3f).
+    need_fixed "$cfg" 'var backgroundResumeGracePeriod: TimeInterval = 25' \
+        "B31 die Schonfrist ist exakt 25 s"
     need_fixed "$vm" 'private var resumeWatchdogTask: Task<Void, Never>?' \
         "B32 der Watchdog ist gespeichert (kein freier Task)"
     section_has "$vm" 'func handleWillEnterForeground' 'func reconcileAfterBackground' \

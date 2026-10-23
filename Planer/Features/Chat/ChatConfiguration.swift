@@ -55,11 +55,16 @@ struct HermesChatConfiguration: Sendable, Equatable {
     /// Frist bliebe `isStreaming` true und der Composer gesperrt, bis der
     /// Prozess neu startet. Grenze: die Frist ist keine Turn-Grenze; ein
     /// Strom, der seit der Rückkehr ein Lebenszeichen geliefert hat, bleibt
-    /// unangetastet (E15). Die 12 s liegen bewusst über der kürzesten
-    /// plausiblen Server-Pause: beim Aufwachen fluten die während der
-    /// Suspension gepufferten Bytes sofort in den Leser — erst **danach** ist
-    /// Stille ein Signal und nicht bloß die Lücke zwischen zwei Paketen.
-    var backgroundResumeGracePeriod: TimeInterval = 12
+    /// unangetastet (E15).
+    ///
+    /// Herleitung (Entscheidung MARAAA-193): Hermes
+    /// sendet auf `POST /v1/chat/completions` alle 10 s ein SSE-Keepalive
+    /// (`CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 10.0`). Zwei verpasste
+    /// Keepalives sind 2 × (10 s + 0,5 s Poll) = 21 s; dazu 4 s Reserve für
+    /// iOS-Aufwachen und URLSession-Puffer ergibt 25 s. Die früheren 12 s
+    /// lagen nur 1,5 s über dem Worst Case und konnten einen gesunden Strom
+    /// abreißen.
+    var backgroundResumeGracePeriod: TimeInterval = 25
     /// Obergrenze des Wartens auf das Ende eines technisch abgebrochenen
     /// Stroms (Rev 9, MARAAA-188).
     ///
