@@ -941,6 +941,14 @@ final class ChatViewModel: ObservableObject {
 
         // E1: kein Erfolgs-Hinweis nach einem verworfenen Turn.
         await reconcileAfterBackground(announcesResume: false)
+        // Runde 4 (W4): `reconcileAfterBackground` gibt den Main-Actor ab
+        // (`openSession`). In diesem Fenster darf `send()` einen neuen Turn
+        // begonnen haben — dann gehören der Verlust-Text und der Wiederholweg
+        // **nicht** mehr zu diesem Turn; sie würden dem neuen Turn als fremde
+        // Meldung samt „Verlauf neu laden“ vorangestellt. Deshalb nach dem
+        // `await` erneut die Generation prüfen. Grenze: im Normalfall ist sie
+        // unverändert, dort ändert sich nichts.
+        guard generation == turnGeneration else { return }
         guard historyLoaded else {
             // Das Nachladen ist gescheitert: `openSession` hat den genaueren
             // Grund gesetzt, `reconcileAfterBackground` den Wiederholweg. Der

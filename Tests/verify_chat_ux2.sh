@@ -72,6 +72,15 @@
 # Wortlaut (`backgroundApprovalExpiredNotice`). B31 pinnt den beschlossenen
 # Wert 12 s statt eines Bereichs.
 #
+# Nachtrag Runde 4 (MARAAA-188, Review-Befunde W1–W4): B49a–B49e schließen die
+# letzten unbewachten Stellen der A1-Verdrahtung. Geprüft wird der **Aufruf**
+# von `abandonDeadStreamIfNeeded` im Rumpf von `scheduleResumeWatchdog` (W1),
+# das Argument `approvalExpired: self.hasExpiredApproval` und die Textauswahl
+# im Abbruch-Pfad (W2), die Reihenfolge `cancel()` **vor** `await
+# waitForTurnStop()` (W3) und der erneute Generationsriegel nach dem
+# Nachladen, bevor Text und Wiederholweg geschrieben werden (W4). Die
+# Mutationsmatrix steht im Bericht zu MARAAA-188 Runde 4.
+#
 # Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
 # Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
 # (`approvalTimeout`) und Zeile 68 (`maxNoticeCharacters`, unverändert aus
@@ -824,6 +833,40 @@ background_section() {
     block_has "$vm" 'private func scheduleResumeWatchdog()' \
         'UInt64\(snapshot\.gracePeriod \* 1_000_000_000\)' \
         "B48j die Schleife wartet die gelesene Schonfrist ab (Befund 3)"
+
+    # --- Runde 4 (MARAAA-188, W1–W4): die letzte Verdrahtung pinnen -----------
+    # W1: Die Rumpf-Prüfungen B34a/B41/B43g/B45a decken `abandonDeadStreamIfNeeded`
+    # selbst ab; fehlte aber der **Aufruf** im Watchdog, bliebe der ganze
+    # A1-Mechanismus unbewacht (genau die Lücke aus dem dritten Review).
+    # Mutation „Aufruf löschen“ ist rot (B49a).
+    block_has "$vm" 'private func scheduleResumeWatchdog()' \
+        'await self\.abandonDeadStreamIfNeeded\(' \
+        "B49a der Watchdog ruft den Abbruch-Pfad im eigenen Rumpf auf (W1)"
+    # W2 (V1): Der Grund des Abbruchs wird am Aufruf übergeben. Stünde dort
+    # `false`, wäre `backgroundApprovalExpiredNotice` toter Text und eine
+    # abgelaufene Freigabe bekäme den falschen (Stream-Verlust-)Wortlaut.
+    # Mutation `false` ist rot (B49b); die Auswahl im Rumpf pinnt B49c.
+    block_has "$vm" 'private func scheduleResumeWatchdog()' \
+        'approvalExpired: self\.hasExpiredApproval' \
+        "B49b der Watchdog gibt den Freigabe-Ablauf als Grund mit (W2/V1)"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
+        'notice = approvalExpired' \
+        "B49c der Abbruch-Pfad wählt den Text nach dem übergebenen Grund (W2/V1)"
+    # W3: Abbrechen **vor** dem begrenzten Warten. Umgekehrt (erst 3 s warten,
+    # dann abbrechen) bliebe der Test grün, wäre aber semantisch falsch —
+    # `waitForTurnStop` sähe einen ungebrochen laufenden Strom und liefe in
+    # jedem Fall in die volle Frist. Mutation „Reihenfolge tauschen“ ist rot.
+    section_order "$vm" 'private func abandonDeadStreamIfNeeded(' 'private func waitForTurnStop' \
+        'runningTask?.cancel()' 'await waitForTurnStop()' \
+        "B49d der Strom wird abgebrochen, bevor begrenzt gewartet wird (W3)"
+    # W4: `reconcileAfterBackground` gibt den Main-Actor ab; ein inzwischen
+    # gestarteter Turn darf weder den Verlust-Text noch den Wiederholweg des
+    # alten Turns erben. Geprüft wird der Riegel **nach** dem Nachladen und
+    # **vor** dem Schreiben (Mutation „guard löschen“ ist rot).
+    section_order "$vm" 'await reconcileAfterBackground\(announcesResume: false\)' \
+        'private func waitForTurnStop' \
+        'guard generation == turnGeneration' 'notice = approvalExpired' \
+        "B49e nach dem Nachladen riegelt die Generation erneut vor dem Schreiben (W4)"
 
     # --- E4 (Befund 4): Info-Optik überall ----------------------------------
     section_has "$view" 'private var emptyState' 'private func scrollToBottom' \
