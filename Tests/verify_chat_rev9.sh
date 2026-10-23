@@ -9,12 +9,18 @@
 #   N1–N10  Der Hintergrund-Hinweis ist ein Hinweis, kein Fehler — die
 #           Unterscheidung ist expliziter Zustand, kein Textvergleich (A5).
 #
-# Mutationsprobe (Nachtrag Runde 2): Jede hier neue Prüfung ist gegen den
-# Ist-Stand `main` rot belegt — dort fehlen `maxStreamEventCharacters` und der
-# Decoder-Verwurf (S1–S17), und `noticeIsInformational` existiert nicht (N1–N10).
-# Beleg: `git worktree add /tmp/probe main`, dieses Skript dorthin kopieren,
-# `bash Tests/verify_chat_rev9.sh all` → Exit 1 mit den S-/N-Zeilen als FAIL.
-# Der Lauf steht im Bericht zu MARAAA-188 (Runde 2) und in der Commit-Nachricht.
+# Mutationsprobe (Nachtrag Runde 2, gemessen am 23.10.2026): Jede in dieser
+# Runde neue Prüfung ist gegen den Ist-Stand `main` (5b454ae) rot belegt. Dort
+# fehlen `maxStreamEventCharacters` und der Decoder-Verwurf (S1–S17), und
+# `noticeIsInformational` existiert nicht (N1–N10).
+# Beleg (eigener Worktree, Skripte hineinkopiert):
+#   git worktree add --detach /tmp/probe main
+#   bash Tests/verify_chat_rev9.sh all  → Exit 1, 18 FAIL (S1–S13, N2–N7)
+#   bash Tests/verify_chat_ux2.sh all   → Exit 1, 41 FAIL (B15, B31–B47)
+#   bash Tests/verify_chat_rev8.sh all  → Exit 1, 3 FAIL (R9c, R9f, X7b)
+#   Ankerprobe `ch4_commit="deadbee"`   → Exit 1, X5a FAIL (nicht vakuum-grün)
+# Die Zahlen stehen im Bericht zu MARAAA-188 (Runde 2) und in der
+# Commit-Nachricht des Nachbesserungs-Commits.
 #
 # Rein statisch: grep/awk/Dateiprüfungen, keine Swift-Toolchain, kein Netz,
 # kein Aufruf anderer Tests.
