@@ -84,6 +84,43 @@ enum ChatStreamError: Error, Equatable, LocalizedError {
     }
 }
 
+/// Gemeinsames Lebenszeichen des Antwortstroms auf Zeilenebene (Rev 9,
+/// MARAAA-188).
+///
+/// Zweck: Der Watchdog nach der Rückkehr aus dem Hintergrund braucht ein
+/// Signal, das auch Keepalives (`: ping`), Leerzeilen und **verworfene**
+/// Ereignisse sieht. `ChatStreamEvent`s allein zählen nur ausgelieferte
+/// Ereignisse — ein Strom, der nur Keepalives schickt, gälte sonst als tot.
+/// Grenze: ein reiner Zähler ohne Turn-Wissen. Die Referenz teilen sich
+/// Anbieter (schreibt je gelesener Zeile) und ViewModel (liest); deshalb
+/// `@unchecked Sendable` mit eigenem Schloss statt eines Werts im `struct`.
+final class ChatStreamLiveness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines = 0
+
+    /// Eine aus dem Strom gelesene Zeile — egal, ob sie ein Ereignis baut,
+    /// ein Kommentar ist oder verworfen wird.
+    func recordLine() {
+        lock.lock()
+        lines += 1
+        lock.unlock()
+    }
+
+    /// Beginn eines neuen Turns: der Zähler startet wieder bei null.
+    func reset() {
+        lock.lock()
+        lines = 0
+        lock.unlock()
+    }
+
+    /// Zahl der seit `reset()` gelesenen Zeilen.
+    var lineCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return lines
+    }
+}
+
 /// Der schmale Vertrag zwischen Chat-Oberfläche und Antwortstrom.
 ///
 /// Zweck: die Oberfläche kennt nur diese Ereignisse; ein anderer Dialekt ist
@@ -122,13 +159,18 @@ struct HermesChatStreamProvider: ChatStreamProvider {
     /// Der Strom-Client trägt `streamIdleTimeout`, nie den 10-s-Default des
     /// `NetworkClient`. Genau eine Instanz, einmal in `init` gebaut.
     private let client: NetworkClient
+    /// Optionaler gemeinsamer Zeilenzähler (Rev 9, MARAAA-188). `nil` = der
+    /// Anbieter zählt nicht — der Strom selbst verhält sich unverändert.
+    private let liveness: ChatStreamLiveness?
 
     init(
         configuration: HermesChatConfiguration = HermesChatConfiguration(),
-        networkClient: NetworkClient? = nil
+        networkClient: NetworkClient? = nil,
+        liveness: ChatStreamLiveness? = nil
     ) {
         self.configuration = configuration
         self.client = networkClient ?? NetworkClient(timeout: configuration.streamIdleTimeout)
+        self.liveness = liveness
     }
 
     func stream(
@@ -269,7 +311,7 @@ struct HermesChatStreamProvider: ChatStreamProvider {
         _ bytes: URLSession.AsyncBytes,
         continuation: AsyncThrowingStream<ChatStreamEvent, Error>.Continuation
     ) async throws {
-        var decoder = ServerSentEventDecoder()
+        var decoder = ServerSentEventDecoder(maxCharacters: configuration.maxStreamEventCharacters)
         var finishReason: String?
         var errorMessage: String?
         var characters = 0
@@ -278,7 +320,19 @@ struct HermesChatStreamProvider: ChatStreamProvider {
 
         for try await line in bytes.lines {
             try Task.checkCancellation()
-            guard let event = try decoder.consume(line: line) else { continue }
+            // A1 (Rev 9, MARAAA-188): jede gelesene Zeile ist ein
+            // Lebenszeichen — auch ein Kommentar/Keepalive oder eine Zeile,
+            // die `consume` verwirft. Bewusst **vor** `consume`: die Zeile ist
+            // dann schon aus dem Strom da.
+            //
+            // Bekannte Grenze (Befund 6, nicht in diesem Auftrag): `lines`
+            // liefert eine einzelne Riesenzeile als Ganzes; der Decoder-Puffer
+            // ist bounded, der Zeilenleser selbst nicht. Ein Byte-Reader wäre
+            // ein Umbau des Stromlesers.
+            liveness?.recordLine()
+            // Ein verworfenes Ereignis (Größenlimit) liefert `nil`; der Strom
+            // liest dann weiter, statt den Turn zu beenden (Rev 9, MARAAA-188).
+            guard let event = decoder.consume(line: line) else { continue }
             let payload = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !payload.isEmpty else { continue }
 

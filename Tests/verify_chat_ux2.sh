@@ -24,6 +24,63 @@
 # (Handler, Karte, Verzweigung), nicht die Datei — die Mutationsmatrix dazu
 # steht im Bericht zu MARAAA-176.
 #
+# Nachtrag Rev 9 (MARAAA-188): B31–B42 prüfen den Wiederanlauf nach der
+# Rückkehr aus dem Hintergrund (Schonfrist, abgebrochener toter Strom,
+# sichtbarer Wiederholweg über `offersHistoryReload`). Sie ändern keine der
+# Prüfungen B1–B30.
+#
+# Nachtrag Runde 2 (MARAAA-188, Review-Befunde 1–4 + 7):
+# B31/B34/B35/B42 sind auf **dieselbe Zusage** umformuliert, weil die
+# Umsetzung sich geändert hat — nicht abgeschwächt:
+#   B31  vorher „5 s“ (eine Zahl), in Runde 2 ein Bereich 10–15 s; seit
+#        Runde 3 wieder exakt: der beschlossene Wert 12 s ist gepinnt (V3f).
+#   B34  vorher „abgebrochen und abgewartet“ via `await runningTask.value`,
+#        jetzt „abgebrochen und **begrenzt** abgewartet“ (E3) plus das Verbot
+#        des unbegrenzten Wartens — dieselbe Zusage, härter geprüft. Runde 3
+#        pinnt zusätzlich `runningTask?.cancel()` (V3d).
+#   B35  vorher `streamEventCount == seenEvents`, jetzt das Lebenszeichen aus
+#        **beiden** Zählern (`resumeLiveness`), verglichen in der Schleife.
+#   B42  vorher „die Frist wird neu gestellt“ (Aufruf von
+#        `scheduleResumeWatchdog`), jetzt „die Runde läuft weiter“ (`continue`)
+#        — die Schleife hat keinen zweiten Task mehr, den man neu stellen
+#        könnte; die Zusage („eine wartende Freigabe bricht nicht ab“) bleibt.
+#   B12  vorher die Signatur `func reconcileAfterBackground() async`, jetzt der
+#        benannte Pfad **mit** Parameter und `async` — E1 braucht den Schalter
+#        `announcesResume`; die Zusage („es gibt **einen** benannten Pfad“)
+#        bleibt. Runde 3 pinnt die vollständige Signatur (V3e).
+#   B15  vorher `if notice == nil`, jetzt `if announcesResume, notice == nil` —
+#        dieselbe Zusage („der Hinweis überschreibt keine Fehlermeldung“).
+# Neu sind B43a–B47 (ehrlicher Ausgang, begrenztes Warten und hartes Schließen,
+# kontinuierlicher Watchdog mit Zeilenzähler, Info-Optik in `emptyState` und
+# `SessionListView`, `reloadHistory`-Wiederangebot). Die frühere Angabe
+# „B43–B52“ in diesem Kopf und in der Commit-Nachricht von 7e24979 war falsch:
+# B48–B52 existierten in Runde 2 nicht (keine Nummer ohne Prüfung, V4).
+#
+# Nachtrag R-CH10 (MARAAA-192, Review-Befunde 1–3 aus G-CH11): B48a–B48j
+# binden den Turn-Riegel an eine Generation (`turnGeneration`,
+# `abandonedGeneration`), prüfen den Reset in `send()` und die Verwendung von
+# `configuration.backgroundResumeGracePeriod` im Watchdog. Damit sind die
+# beiden Testlücken aus MARAAA-189 (Mutationen M11/M12) geschlossen und der
+# verspätete `run` aus Befund 1 ist statisch abgedeckt; Rot-Belege im Bericht
+# zu MARAAA-192.
+#
+# Nachtrag Runde 3 (MARAAA-188, Review-Befunde A1/V1–V6): Die Prüfungen B12,
+# B31, B34a, B42, B43g und B45d prüfen jetzt die **Zusage im Rumpf** statt nur
+# ein Wort in der Nachbarschaft. Jede ist durch die im Bericht genannte
+# Mutation rot belegt. B42 gilt nur noch für eine **entscheidbare** Freigabe
+# (`.open`/`acceptsDecision`); `.expired` endet im Abbruch-Pfad mit eigenem
+# Wortlaut (`backgroundApprovalExpiredNotice`). B31 pinnt den beschlossenen
+# Wert 12 s statt eines Bereichs.
+#
+# Nachtrag Runde 4 (MARAAA-188, Review-Befunde W1–W4): B49a–B49e schließen die
+# letzten unbewachten Stellen der A1-Verdrahtung. Geprüft wird der **Aufruf**
+# von `abandonDeadStreamIfNeeded` im Rumpf von `scheduleResumeWatchdog` (W1),
+# das Argument `approvalExpired: self.hasExpiredApproval` und die Textauswahl
+# im Abbruch-Pfad (W2), die Reihenfolge `cancel()` **vor** `await
+# waitForTurnStop()` (W3) und der erneute Generationsriegel nach dem
+# Nachladen, bevor Text und Wiederholweg geschrieben werden (W4). Die
+# Mutationsmatrix steht im Bericht zu MARAAA-188 Runde 4.
+#
 # Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
 # Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
 # (`approvalTimeout`) und Zeile 68 (`maxNoticeCharacters`, unverändert aus
@@ -41,6 +98,8 @@ chat="Planer/Features/Chat"
 vm="$chat/ChatViewModel.swift"
 view="$chat/ChatView.swift"
 cfg="$chat/ChatConfiguration.swift"
+slv="$chat/SessionListView.swift"
+prov="$chat/ChatStreamProvider.swift"
 chips="$chat/ToolConfirmationChips.swift"
 card="$chat/ToolCallCard.swift"
 phase="$chat/ApprovalPhase.swift"
@@ -538,8 +597,8 @@ background_section() {
         "B10 das Ende ist idempotent (Riegel)"
     need_fixed "$vm" 'static let backgroundResumeNotice = "Der Chat war im Hintergrund. Der Verlauf wurde vom Server neu geladen."' \
         "B11 der Hinweis ist wörtlich (A7)"
-    need "$vm" 'func reconcileAfterBackground\(\) async' \
-        "B12 die Rückkehr hat einen benannten Pfad"
+    need_fixed "$vm" 'func reconcileAfterBackground(announcesResume: Bool = true) async' \
+        "B12 die Rückkehr hat genau einen benannten Pfad — vollständige Signatur inkl. async (V3e)"
     section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
         'await openSession\(session\)' \
         "B13 nachgeladen wird über den vorhandenen Verlaufspfad"
@@ -547,7 +606,7 @@ background_section() {
         'guard !isStreaming else \{ return \}' \
         "B14 ein lebender Strom gewinnt gegen die Reconciliation (E15)"
     section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
-        'if notice == nil' \
+        'if announcesResume, notice == nil' \
         "B15 der Hintergrund-Hinweis überschreibt keine Fehlermeldung"
     section_has "$vm" 'func handleDidEnterBackground' 'func handleWillEnterForeground' \
         'beginBackgroundTaskIfNeeded\(\)' \
@@ -595,6 +654,238 @@ background_section() {
         "B29 der Handler betritt den Main-Actor synchron, ohne Hop (F1)"
     block_lacks "$vm" "$handler" 'Task(\.[A-Za-z]+)?[[:space:]]*\{' \
         "B30 kein Task-Hop im Handler — UIKit verlangt die Freigabe vor der Rückkehr (F1)"
+
+    # --- A1/A2 (Rev 9, MARAAA-188): die Rückkehr endet nicht im toten Strom --
+    # Ein Strom, den die Suspension getötet hat, liefert nie einen Fehler: sein
+    # `URLSession`-Request lebt bis `streamIdleTimeout` (Default 900 s) weiter.
+    # Ohne Schonfrist bliebe `isStreaming` true und der Composer gesperrt —
+    # genau der Nutzerbericht „ich muss die App neu starten“.
+    # B31: der beschlossene Wert ist 12 s — exakt gepinnt, nicht als Bereich.
+    # Eine Änderung auf 5 s (oder jeden anderen Wert) ist rot (V3f).
+    need_fixed "$cfg" 'var backgroundResumeGracePeriod: TimeInterval = 12' \
+        "B31 die Schonfrist ist exakt 12 s"
+    need_fixed "$vm" 'private var resumeWatchdogTask: Task<Void, Never>?' \
+        "B32 der Watchdog ist gespeichert (kein freier Task)"
+    section_has "$vm" 'func handleWillEnterForeground' 'func reconcileAfterBackground' \
+        'scheduleResumeWatchdog\(\)' \
+        "B33 die Rückkehr stellt bei laufendem Strom den Watchdog"
+    # B34: der tote Strom wird **abgebrochen** (`cancel()`, V3d) und
+    # **begrenzt** abgewartet (E3). Vorher stand hier `await runningTask.value`
+    # — das hinge an genau dem Task, der hängt; die Zusage „abwarten, dann
+    # aufräumen“ bleibt.
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'runningTask\?\.cancel\(\)' \
+        "B34a der tote Strom wird abgebrochen (E3, V3d)"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'await waitForTurnStop\(\)' \
+        "B34a2 nach dem Abbruch wird begrenzt abgewartet (E3)"
+    ban "$vm" 'await runningTask\.value' \
+        "B34b kein unbegrenztes Warten auf den Task (E3)"
+    block_has "$vm" 'private func waitForTurnStop()' 'streamStopWaitLimit' \
+        "B34c die Wartezeit ist ein benannter Wert (E3)"
+    # B35: Lebenszeichen = ausgelieferte **und** gelesene Zeilen. Vorher zählte
+    # nur `streamEventCount`; die Zusage („Verkehr hält den Strom am Leben“)
+    # bleibt, der Begriff ist jetzt vollständig.
+    block_has "$vm" 'private var resumeLiveness: ResumeLiveness' 'streamEventCount' \
+        "B35a das Lebenszeichen liest die Ereignisse"
+    block_has "$vm" 'private var resumeLiveness: ResumeLiveness' 'lineCount' \
+        "B35b das Lebenszeichen liest die gelesenen Zeilen (Keepalive/verworfen)"
+    section_has "$vm" 'private func scheduleResumeWatchdog' 'private func cancelResumeWatchdog' \
+        'resumeLiveness != marker' \
+        "B35c ein Strom mit neuem Lebenszeichen gewinnt gegen die Frist (E15/B14)"
+    section_order "$vm" 'private func run(text: String, generation: Int) async' 'private func rescueEmptyTurn' \
+        'defer {' 'cancelResumeWatchdog\(\)' \
+        "B36 das Turn-Ende bricht den Watchdog ab"
+    block_has "$vm" 'deinit {' 'resumeWatchdogTask\?\.cancel\(\)' \
+        "B37 der Deinit bricht den Watchdog ab"
+    section_has "$vm" 'func handleDidEnterBackground' 'func handleWillEnterForeground' \
+        'cancelResumeWatchdog\(\)' \
+        "B38 der Wechsel in den Hintergrund bricht den Watchdog ab"
+    section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
+        'if !historyLoaded \{ offerHistoryReload\(\) \}' \
+        "B39 gescheitertes Nachladen bietet den Wiederholweg (A2)"
+    section_lacks "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
+        'offersHistoryReload = false' \
+        "B40 die Rückkehr nimmt den Wiederholweg nicht wieder zurück (A2)"
+    # B41 hält die Semantik aus B14 fest: der Watchdog greift nur, wenn seit der
+    # Rückkehr kein einziges Lebenszeichen ankam — ein lebender Strom wird nicht
+    # abgebrochen, nur weil die Frist abläuft.
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
+        'guard isStreaming else \{ return \}' \
+        "B41 ohne laufenden Turn tut der Watchdog nichts"
+    # B42 (V1): die Freigabe-Ausnahme gilt nur für eine **entscheidbare**
+    # Freigabe (`.open`/`acceptsDecision`). `.expired` wartet zwar
+    # serverseitig weiter (`waitsForUser`), hat aber keine Chips mehr; der
+    # Watchdog darf ihn nicht bis `streamIdleTimeout` sperren. Geprüft wird der
+    # `continue`-Zweig im Rumpf — die Mutation „continue entfernen“ ist rot
+    # (V3c). B42b belegt, dass die Ausnahme nicht mehr an `waitsForUser` hängt;
+    # B42c, dass der Ablauf im Abbruch-Pfad einen eigenen Wortlaut hat.
+    block_has "$vm" 'private func scheduleResumeWatchdog()' \
+        'if self\.hasDecidableApproval \{ continue \}' \
+        "B42a nur eine entscheidbare Freigabe lässt die Frist weiterlaufen (V1/V3c)"
+    block_has "$vm" 'private var hasDecidableApproval' 'acceptsDecision' \
+        "B42b die Ausnahme prüft acceptsDecision, nicht waitsForUser (V1)"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
+        'backgroundApprovalExpiredNotice' \
+        "B42c der Ablauf endet mit eigenem, ehrlichem Wortlaut (V1)"
+
+    # --- E1 (Befund 1): ehrlicher Ausgang statt Erfolgs-Hinweis --------------
+    # Ein stiller und ein toter Strom sind nicht unterscheidbar. Die Frist darf
+    # deshalb beenden — aber sie darf keinen Erfolg behaupten.
+    need_fixed "$vm" 'static let backgroundStreamLostNotice = ' \
+        "B43a es gibt einen eigenen Wortlaut für den abgerissenen Turn (E1)"
+    local lost_len
+    lost_len="$(sed -n 's/^[[:space:]]*static let backgroundStreamLostNotice = "\(.*\)"$/\1/p' "$vm" | wc -m | tr -d ' ')"
+    if [[ -n "$lost_len" && "$lost_len" -ge 20 && "$lost_len" -le 301 ]]; then
+        pass "B43b der Verlust-Text bleibt im Rahmen (≤ 300 Zeichen: $((lost_len - 1)))"
+    else
+        bad "B43b Verlust-Text: ${lost_len:-0} Zeichen (inkl. Zeilenende), erwartet 20–300  [$vm]"
+    fi
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'backgroundStreamLostNotice' \
+        "B43c der Abbruch-Pfad setzt den ehrlichen Text (E1)"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'offerHistoryReload\(\)' \
+        "B43d der Abbruch-Pfad bietet den Wiederholweg an (E1/A2)"
+    block_lacks "$vm" 'private func abandonDeadStreamIfNeeded(' 'backgroundResumeNotice' \
+        "B43e der Abbruch-Pfad behauptet keinen Erfolg (E1)"
+    block_lacks "$vm" 'private func abandonDeadStreamIfNeeded(' 'noticeIsInformational = true' \
+        "B43f der Verlust-Text behält die Warn-Optik (E1)"
+    # B43g (V3a): geprüft wird der **Aufruf** im Abbruch-Rumpf, nicht das Wort
+    # `announcesResume` in der Signatur. Mutation `false` -> `true` ist rot.
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
+        'reconcileAfterBackground\(announcesResume: false\)' \
+        "B43g der Erfolgs-Hinweis ist im Abbruch-Pfad abgeschaltet (E1/V3a)"
+
+    # --- E2 (Befund 2): der Watchdog ist kontinuierlich ----------------------
+    # Vorher galt „seit der Rückkehr kein Ereignis“ genau einmal; ein Strom,
+    # der nach einem letzten Ereignis starb, blieb bis 900 s „lebendig“.
+    block_has "$vm" 'private func scheduleResumeWatchdog()' 'while !Task\.isCancelled' \
+        "B44a der Watchdog ist eine Task mit Schleife (E2)"
+    block_has "$vm" 'private func scheduleResumeWatchdog()' 'Task\.sleep' \
+        "B44b je Runde wird die Schonfrist abgewartet"
+    block_has "$vm" 'private func scheduleResumeWatchdog()' 'continue' \
+        "B44c neue Lebenszeichen lassen die nächste Runde beginnen"
+    exactly "$vm" 'resumeWatchdogTask = Task' 1 \
+        "B44d genau eine Stelle erzeugt den Watchdog-Task (kein Task je Ereignis)"
+    block_lacks "$vm" 'private func streamTurn' 'Task \{' \
+        "B44e im Ereignis-Pfad entsteht kein Task (E2)"
+    need_fixed "$prov" 'liveness?.recordLine()' \
+        "B44f jede gelesene Zeile zählt — auch Keepalive und verworfene Zeile (E2)"
+    section_has "$prov" 'for try await line in bytes.lines' 'guard let event = decoder.consume' \
+        'liveness\?\.recordLine\(\)' \
+        "B44g die Zeile zählt vor dem Verwerfen (E2)"
+    need_fixed "$vm" 'private let liveness = ChatStreamLiveness()' \
+        "B44h die Zähler-Referenz gehört dem Modell (E2)"
+    need_fixed "$vm" 'liveness.reset()' \
+        "B44i der Zeilenzähler startet je Turn bei null (E2)"
+
+    # --- E3 (Befund 3): begrenztes Warten und hartes Schließen ---------------
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'isStreaming = false' \
+        "B45a der Turn-Zustand wird nach dem Abbruch hart geschlossen (E3)"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'turnStartedAt = nil' \
+        "B45b die Arbeits-Animation endet mit dem Turn (E3)"
+    section_order "$vm" 'private func abandonDeadStreamIfNeeded(' 'private func waitForTurnStop' \
+        'isStreaming = false' 'reconcileAfterBackground\(' \
+        "B45c das Schließen steht vor dem Nachladen (E3)"
+    # B45d (V3b): der Riegel wird im **Abbruch-Rumpf** gesetzt — die Generation
+    # bindet ihn an genau diesen Turn. Mutation „Zuweisung löschen“ ist rot.
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'abandonedGeneration = generation' \
+        "B45d der Abbruch-Riegel wird turn-gebunden gesetzt (E3/V2/V3b)"
+    block_has "$vm" 'private func merge(sessionID: String)' 'guard abandonedGeneration != generation' \
+        "B45e auch ein spätes Merge-Ergebnis wird verworfen (E3/V2)"
+
+    # --- R-CH10 (MARAAA-192): Turn-Identität statt globalem Riegel -----------
+    # Befund 1 (major, G-CH11/MARAAA-189): Ein `run`, der das begrenzte Warten
+    # (`streamStopWaitLimit` = 3 s) überlebt, darf den Zustand eines inzwischen
+    # gestarteten Turns nicht mehr setzen. Die Generation steigt in `send()`
+    # und wird von `run`/`streamTurn`/`merge` als Konstante geführt; jeder
+    # schreibende Schritt vergleicht sie. Ohne diese Marken ist der Fall
+    # „Testanbieter ignoriert `Task.cancel`, wirft erst nach mehr als
+    # `streamStopWaitLimit`, währenddessen startet ein zweiter Turn“ offen —
+    # auf `b8863df` fehlen alle Marken (rot, siehe Bericht zu MARAAA-192).
+    section_order "$vm" 'private func run(text: String, generation: Int) async' 'do {' \
+        'if generation == turnGeneration' 'isStreaming = false' \
+        "B48a der defer schließt nur den eigenen Turn (Befund 1)"
+    section_order "$vm" 'private func run(text: String, generation: Int) async' 'do {' \
+        'if generation == turnGeneration' 'cancelResumeWatchdog\(\)' \
+        "B48b ein alter defer bricht nicht den Watchdog des neuen Turns ab (Befund 1)"
+    at_least "$vm" 'guard generation == turnGeneration, abandonedGeneration != generation else \{ return \}' 7 \
+        "B48c jeder Schritt in run/streamTurn prüft die Generation vor dem Schreiben (Befund 1: 4 in run, 3 in streamTurn)"
+    block_has "$vm" 'private func merge(sessionID: String)' \
+        'guard generation == turnGeneration, abandonedGeneration != generation' \
+        "B48d ein Merge prüft die Generation nach dem await erneut (Befund 1)"
+    block_has "$vm" 'private func run(text: String, generation: Int) async' \
+        'guard generation == turnGeneration, abandonedGeneration != generation else \{ return \}' \
+        "B48e der catch meldet keinen fremden Turn (Befund 1)"
+    # Befund 2 (minor): `send()` öffnet den Riegel für den neuen Turn — genau
+    # einmal und nach dem Hochzählen der Generation. Mutation „Zeile löschen“
+    # ist rot (B48f/B48g/B48h).
+    block_has "$vm" 'func send()' 'abandonedGeneration = nil' \
+        "B48f send() öffnet den Riegel des Vorgängers (Befund 2)"
+    exactly "$vm" '^[[:space:]]*abandonedGeneration = nil$' 1 \
+        "B48g der Reset steht genau einmal im Baum (Befund 2)"
+    section_order "$vm" 'func send()' 'isStreaming = true' \
+        'turnGeneration \+= 1' 'abandonedGeneration = nil' \
+        "B48h die neue Generation steht vor dem Reset (Befund 2)"
+    # Befund 3 (minor): die Schonfrist wird an der Verwendungsstelle aus der
+    # Konfiguration gelesen. Mutation `0.001` an genau dieser Stelle ist rot
+    # (B48i), ebenso ein Literal im `sleep` statt `snapshot.gracePeriod` (B48j).
+    block_has "$vm" 'private func resumeWatchdogSnapshot()' \
+        'gracePeriod: max\(configuration\.backgroundResumeGracePeriod, 0\)' \
+        "B48i der Watchdog liest die Schonfrist aus der Konfiguration (Befund 3)"
+    block_has "$vm" 'private func scheduleResumeWatchdog()' \
+        'UInt64\(snapshot\.gracePeriod \* 1_000_000_000\)' \
+        "B48j die Schleife wartet die gelesene Schonfrist ab (Befund 3)"
+
+    # --- Runde 4 (MARAAA-188, W1–W4): die letzte Verdrahtung pinnen -----------
+    # W1: Die Rumpf-Prüfungen B34a/B41/B43g/B45a decken `abandonDeadStreamIfNeeded`
+    # selbst ab; fehlte aber der **Aufruf** im Watchdog, bliebe der ganze
+    # A1-Mechanismus unbewacht (genau die Lücke aus dem dritten Review).
+    # Mutation „Aufruf löschen“ ist rot (B49a).
+    block_has "$vm" 'private func scheduleResumeWatchdog()' \
+        'await self\.abandonDeadStreamIfNeeded\(' \
+        "B49a der Watchdog ruft den Abbruch-Pfad im eigenen Rumpf auf (W1)"
+    # W2 (V1): Der Grund des Abbruchs wird am Aufruf übergeben. Stünde dort
+    # `false`, wäre `backgroundApprovalExpiredNotice` toter Text und eine
+    # abgelaufene Freigabe bekäme den falschen (Stream-Verlust-)Wortlaut.
+    # Mutation `false` ist rot (B49b); die Auswahl im Rumpf pinnt B49c.
+    block_has "$vm" 'private func scheduleResumeWatchdog()' \
+        'approvalExpired: self\.hasExpiredApproval' \
+        "B49b der Watchdog gibt den Freigabe-Ablauf als Grund mit (W2/V1)"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
+        'notice = approvalExpired' \
+        "B49c der Abbruch-Pfad wählt den Text nach dem übergebenen Grund (W2/V1)"
+    # W3: Abbrechen **vor** dem begrenzten Warten. Umgekehrt (erst 3 s warten,
+    # dann abbrechen) bliebe der Test grün, wäre aber semantisch falsch —
+    # `waitForTurnStop` sähe einen ungebrochen laufenden Strom und liefe in
+    # jedem Fall in die volle Frist. Mutation „Reihenfolge tauschen“ ist rot.
+    section_order "$vm" 'private func abandonDeadStreamIfNeeded(' 'private func waitForTurnStop' \
+        'runningTask?.cancel()' 'await waitForTurnStop()' \
+        "B49d der Strom wird abgebrochen, bevor begrenzt gewartet wird (W3)"
+    # W4: `reconcileAfterBackground` gibt den Main-Actor ab; ein inzwischen
+    # gestarteter Turn darf weder den Verlust-Text noch den Wiederholweg des
+    # alten Turns erben. Geprüft wird der Riegel **nach** dem Nachladen und
+    # **vor** dem Schreiben (Mutation „guard löschen“ ist rot).
+    section_order "$vm" 'await reconcileAfterBackground\(announcesResume: false\)' \
+        'private func waitForTurnStop' \
+        'guard generation == turnGeneration' 'notice = approvalExpired' \
+        "B49e nach dem Nachladen riegelt die Generation erneut vor dem Schreiben (W4)"
+
+    # --- E4 (Befund 4): Info-Optik überall ----------------------------------
+    section_has "$view" 'private var emptyState' 'private func scrollToBottom' \
+        '!viewModel\.noticeIsInformational' \
+        "B46a die ChatView wertet die Info-Optik im Leerzustand aus (E4)"
+    section_has "$view" 'private var emptyState' 'private func scrollToBottom' \
+        'if !viewModel\.noticeIsInformational \{' \
+        "B46b ein reiner Hinweis bekommt keinen zweiten Weg (E4)"
+    need_fixed "$slv" 'let errorIsInformational: Bool' \
+        "B46c die Verlaufsliste kennt den Unterschied (E4)"
+    section_has "$slv" 'private var emptyState' '// MARK: Darstellung' \
+        'errorIsInformational' \
+        "B46d die Verlaufsliste zeigt einen Hinweis nicht als Verbindungsfehler (E4)"
+    need_fixed "$view" 'errorIsInformational: viewModel.noticeIsInformational' \
+        "B46e die View reicht die Unterscheidung durch, statt den Text zu prüfen (E4)"
+
+    # --- E6 (Befund 7): der Wiederholweg überlebt ein gescheitertes Laden ----
+    block_has "$vm" 'func reloadHistory() async' 'offerHistoryReload\(\)' \
+        "B47 scheitert auch das erneute Laden, bleibt der Wiederholweg (E6)"
 }
 
 # ---------------------------------------------------------------------------
