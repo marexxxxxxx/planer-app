@@ -107,6 +107,38 @@ section_lacks() {
     fi
 }
 
+# Klammerblock ab der ersten Zeile eines Abschnitts, die $4 enthaelt, bis zur
+# Zeile, auf der die Klammerung wieder auf 0 steht. So laesst sich ein `defer`
+# von gleichnamigen Bloecken davor und dahinter unterscheiden. Die Grenze ist
+# woertlich (index()); `-v` bekommt deshalb kein Regex-Escaping.
+section_block() {
+    section "$1" "$2" "$3" | awk -v s="$4" '
+        !f && index($0, s) > 0 { f = 1 }
+        f {
+            print
+            line = $0
+            opens = gsub(/\{/, "{", line)
+            closes = gsub(/\}/, "}", line)
+            if (opens > 0) seen = 1
+            depth += opens - closes
+            if (seen && depth <= 0) exit
+        }'
+}
+
+section_block_has() {
+    local file="$1" start="$2" end="$3" open="$4" pattern="$5" label="$6" body
+    body="$(section_block "$file" "$start" "$end" "$open")"
+    if [[ -z "$body" ]]; then
+        bad "$label  [$file: Block /$open/ in /$start/../$end/ nicht gefunden]"
+        return
+    fi
+    if grep -qE "$pattern" <<<"$body"; then
+        pass "$label"
+    else
+        bad "$label  [$file, Block /$open/ in /$start/../$end/ ~ /$pattern/]"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # L1-L6, L17: der Abgleich als reine Funktion (W2).
 # ---------------------------------------------------------------------------
@@ -166,11 +198,11 @@ section_has "$vm" 'private func liveActivitySync(' 'private func applyHistoryDel
     'liveActivityMaxConsecutiveFailures' 'L9b Schleife prueft den Fehlerzaehler'
 
 # L10: die Schleife startet mit dem Werkzeug-Frame und endet im defer.
-section_has "$vm" 'private func streamTurn(' 'F15: Der Server' \
+section_block_has "$vm" 'private func streamTurn(' 'F15: Der Server' 'defer {' \
     'liveActivityTask\?\.cancel\(\)' 'L10a Abgleich endet mit dem Turn'
 section_has "$vm" 'private func streamTurn(' 'F15: Der Server' \
-    'case \.toolProgress' 'L10b Werkzeug-Frame ist die Startbedingung'
-section_has "$vm" 'private func streamTurn(' 'F15: Der Server' \
+    'case .toolProgress' 'L10b Werkzeug-Frame ist die Startbedingung'
+section_has "$vm" 'case .toolProgress' 'case .status' \
     'startLiveActivitySync\(' 'L10c Werkzeug-Frame startet den Abgleich'
 
 # L11: die Aufrufstelle prueft die Generation.
