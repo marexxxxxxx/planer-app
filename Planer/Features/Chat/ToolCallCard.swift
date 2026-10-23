@@ -101,7 +101,12 @@ struct ToolCallCard: View {
                 detail(
                     title: "Argumente",
                     value: argumentsText,
-                    missing: "Argumente nicht geladen"
+                    // Nur eine laufende Karte hat noch keine Argumente; nach
+                    // dem Turn ist „nicht geladen“ die Wahrheit
+                    // (spec-chat-live-activity §5.1/6).
+                    missing: status == .running
+                        ? "Argumente werden geladen …"
+                        : "Argumente nicht geladen"
                 )
                 detail(
                     title: "Ergebnis",

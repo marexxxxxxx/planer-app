@@ -275,6 +275,12 @@ struct ChatView: View {
             .onChange(of: viewModel.entries.last?.id) { _, _ in
                 scrollToBottom(proxy)
             }
+            // spec-chat-live-activity §5.1/5: eine wachsende Bubble ändert die
+            // ID des Eintrags nicht. Ohne diesen Beobachter bliebe der Verlauf
+            // beim Textwachstum stehen, obwohl Text ankommt.
+            .onChange(of: viewModel.entries.last?.text.count) { _, _ in
+                scrollToBottom(proxy)
+            }
         }
     }
 

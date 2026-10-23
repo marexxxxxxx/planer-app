@@ -213,6 +213,13 @@ final class ChatViewModel: ObservableObject {
     private var configuration: HermesChatConfiguration
 
     private var streamTask: Task<Void, Never>?
+    /// Der Verlaufsabgleich eines Turns (spec-chat-live-activity §5.1/2).
+    ///
+    /// Grenze: genau **eine** Schleife je Turn. Sie startet mit dem ersten
+    /// Werkzeug-Frame, endet im `defer` von `streamTurn` und läuft nie über
+    /// den Turn hinaus. `non-nil` nach dem Ende heißt „in diesem Turn schon
+    /// gelaufen“ — ein weiterer Werkzeug-Frame startet sie nicht neu.
+    private var liveActivityTask: Task<Void, Never>?
     /// A1 (Rev 9, MARAAA-188): Schonfrist-Task nach der Rückkehr aus dem
     /// Hintergrund; `nil` = kein laufender Watchdog.
     ///
@@ -379,8 +386,18 @@ final class ChatViewModel: ObservableObject {
             return .writing
         }
 
+        // spec-chat-live-activity §5.1/4: „Denkt nach“ ist erst wahr, wenn
+        // Denken ankommt. Davor — verbunden, aber ohne Inhalt — steht die
+        // ehrliche Wartezeile. Die Reihenfolge ist verbindlich: Freigabe →
+        // Werkzeug → Text → Warten → Denken.
+        if let lastAgent = entries.last(where: {
+            $0.kind == .agent && turnEntryIDs.contains($0.id)
+        }), let reasoning = lastAgent.reasoning, !reasoning.isEmpty {
+            return .thinking
+        }
+
         if !streamStarted { return .connecting }
-        return .thinking
+        return .waitingForModel
     }
 
     // MARK: Arbeitsanzeige
@@ -1284,6 +1301,11 @@ final class ChatViewModel: ObservableObject {
         // H1: die Antwort-ID kann von der gesendeten abweichen.
         var effectiveSessionID = sessionID
         defer {
+            // spec-chat-live-activity §5.1/2: der Abgleich gehört zum Turn,
+            // nicht zur Karte. Nach dem Turn — auch nach einem Abbruch —
+            // läuft keine Anfrage weiter.
+            liveActivityTask?.cancel()
+            liveActivityTask = nil
             // V2: ein später alter Turn beendet nicht das Vorlesen des neuen.
             if generation == turnGeneration { voice?.finishAssistantStream() }
         }
@@ -1341,6 +1363,10 @@ final class ChatViewModel: ObservableObject {
 
             case .toolProgress(let progress):
                 apply(progress)
+                // §5.2: der Abgleich startet mit dem **ersten** Werkzeug-Frame.
+                // Vorher gibt es nichts zu holen, und die Wartezeit auf das
+                // Modell soll nicht mit Anfragen belegt werden.
+                startLiveActivitySync(sessionID: effectiveSessionID, generation: generation)
 
             case .status(let note):
                 statusNote = note
@@ -1455,6 +1481,138 @@ final class ChatViewModel: ObservableObject {
         )
         entries.append(entry)
         turnEntryIDs.insert(entry.id)
+    }
+
+    // MARK: Live-Verlaufsabgleich (spec-chat-live-activity §5.1)
+
+    /// Startet den Abgleich, wenn dieser Turn noch keinen hat.
+    ///
+    /// Grenze: höchstens einmal je Turn; ohne bekannte Sitzung oder ohne
+    /// Wasserstand startet er nicht (§5.3/2, §5.3/3). Vor dem ersten
+    /// Werkzeug-Frame wird er nicht aufgerufen (§5.2).
+    private func startLiveActivitySync(sessionID: String, generation: Int) {
+        guard liveActivityTask == nil else { return }
+        guard watermark != nil || createdSessionThisTurn else { return }
+        liveActivityTask = Task {
+            await self.liveActivitySync(sessionID: sessionID, generation: generation)
+        }
+    }
+
+    /// Holt den Verlauf, solange der Turn läuft, und füllt die Karten daraus.
+    ///
+    /// Grenze: eine Leseanfrage je Takt, kein Schreiben, kein zweiter Merge.
+    /// Die Schleife endet bei Turn-Wechsel, Turn-Ende, zwei Fehlern in Folge
+    /// und am Deckel; die Task selbst beendet `streamTurn`.
+    private func liveActivitySync(sessionID: String, generation: Int) async {
+        var consecutiveFailures = 0
+        var polls = 0
+        while polls < configuration.liveActivityMaxPolls {
+            if Task.isCancelled { return }
+            guard generation == turnGeneration,
+                  abandonedGeneration != generation,
+                  isStreaming
+            else { return }
+            // Kein Zahlenliteral: der Takt steht in der Konfiguration (§5.2).
+            guard (try? await Task.sleep(for: .seconds(configuration.liveActivityPollInterval))) != nil
+            else { return }
+            if Task.isCancelled { return }
+            guard generation == turnGeneration,
+                  abandonedGeneration != generation,
+                  isStreaming
+            else { return }
+
+            polls += 1
+            do {
+                let page = try await api.messages(
+                    sessionID: sessionID,
+                    limit: configuration.liveActivityPageSize,
+                    offset: 0,
+                    order: .latest
+                )
+                consecutiveFailures = 0
+                // Nach dem `await` kann der Turn vorbei sein; dann darf das
+                // späte Ergebnis keinen Zustand mehr anfassen.
+                guard generation == turnGeneration,
+                      abandonedGeneration != generation
+                else { return }
+                let fresh = page.messages
+                    .filter { $0.id > (watermark ?? -1) }
+                    .sorted { $0.id < $1.id }
+                applyHistoryDelta(fresh)
+            } catch {
+                if error is CancellationError { return }
+                consecutiveFailures += 1
+                if consecutiveFailures >= configuration.liveActivityMaxConsecutiveFailures {
+                    return
+                }
+            }
+        }
+    }
+
+    /// Füllt vorhandene Werkzeugkarten aus einer Verlaufsseite (§5.1/1).
+    ///
+    /// Grenze: **nur** Werkzeugzeilen. Agent-Text, Freigaben und der Merge
+    /// bleiben unangetastet; der Aufklappzustand ist Nutzerentscheidung und
+    /// wird hier nie gesetzt. Karten werden über `toolCallID` gefunden und nur
+    /// angelegt, wenn der Live-Strom sie noch nicht gemeldet hat.
+    private func applyHistoryDelta(_ messages: [ChatMessage]) {
+        guard !messages.isEmpty else { return }
+
+        // Ergebnisse zuerst sammeln: eine `tool`-Zeile steht in der Seite
+        // hinter ihrer Assistentenzeile, die Karte entsteht aber davor.
+        var results: [String: String] = [:]
+        for message in messages where message.role == "tool" {
+            guard message.displayKind != "hidden", let callID = message.toolCallID else { continue }
+            results[callID] = message.content.map {
+                boundedText($0, limit: configuration.maxToolDetailCharacters)
+            }
+        }
+
+        for message in messages where message.role == "assistant" {
+            guard message.displayKind != "hidden" else { continue }
+            for call in message.toolCalls ?? [] {
+                guard let callID = call.id else { continue }
+                let arguments = call.function?.arguments.map {
+                    boundedText($0, limit: configuration.maxToolDetailCharacters)
+                }
+                let result = results[callID]
+
+                if let index = entries.firstIndex(where: {
+                    $0.kind == .tool && $0.toolCallID == callID
+                }) {
+                    // Der Live-Name aus `label` ist genauer als der Rohname.
+                    if (entries[index].toolName ?? "").isEmpty,
+                       let name = call.function?.name, !name.isEmpty {
+                        entries[index].toolName = name
+                    }
+                    if entries[index].toolArgs == nil {
+                        entries[index].toolArgs = arguments
+                    }
+                    if let result {
+                        entries[index].toolResult = result
+                        entries[index].toolStatus = .completed
+                    } else {
+                        // Nie einen bereits abgeschlossenen Status zurückdrehen.
+                        let isOpen = entries[index].toolStatus == nil
+                            || entries[index].toolStatus == .running
+                        if isOpen { entries[index].toolStatus = .running }
+                    }
+                    continue
+                }
+
+                let entry = Entry(
+                    kind: .tool,
+                    text: "",
+                    toolCallID: callID,
+                    toolName: call.function?.name,
+                    toolArgs: arguments,
+                    toolResult: result,
+                    toolStatus: result == nil ? .running : .completed
+                )
+                entries.append(entry)
+                turnEntryIDs.insert(entry.id)
+            }
+        }
     }
 
     private func apply(_ approval: ChatApproval) {

@@ -7,7 +7,8 @@
 
 import SwiftUI
 
-/// Die fünf Phasen eines laufenden Turns; wörtliche Texte (§3.4.1).
+/// Die sechs Phasen eines laufenden Turns; wörtliche Texte (§3.4.1,
+/// spec-chat-live-activity §5.1/4).
 ///
 /// Zweck: die Statuszeile benennt, **was** der Turn tut, während die Blase
 /// zeigt, **was** er sagt. Abgeleitet in `ChatViewModel.turnPhase` — es gibt
@@ -15,6 +16,8 @@ import SwiftUI
 enum ChatTurnPhase: Equatable, Sendable {
 
     case connecting
+    /// Verbunden, aber weder Denken noch Text noch Werkzeug angekommen.
+    case waitingForModel
     case thinking
     case tool(name: String)
     case awaitingApproval
@@ -24,6 +27,7 @@ enum ChatTurnPhase: Equatable, Sendable {
     var title: String {
         switch self {
         case .connecting: return "Verbindet …"
+        case .waitingForModel: return "Wartet auf das Modell …"
         case .thinking: return "Denkt nach …"
         case .tool(let name): return "Werkzeug \(name)"
         case .awaitingApproval: return "Wartet auf Freigabe …"
@@ -65,6 +69,7 @@ struct ChatPhaseStatusView: View {
 #Preview("ChatPhaseStatusView") {
     VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
         ChatPhaseStatusView(phase: .connecting)
+        ChatPhaseStatusView(phase: .waitingForModel)
         ChatPhaseStatusView(phase: .thinking)
         ChatPhaseStatusView(phase: .tool(name: "hermes_tasks_list"))
         ChatPhaseStatusView(phase: .awaitingApproval)

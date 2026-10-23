@@ -85,6 +85,25 @@ struct HermesChatConfiguration: Sendable, Equatable {
     /// 5 × 100 = 500 geladene Nachrichten (Server-Deckel).
     var maxMessagePages = 5
 
+    // MARK: Live-Abgleich (spec-chat-live-activity §5.2)
+
+    /// Takt des Verlaufsabgleichs, solange ein Werkzeug läuft.
+    ///
+    /// Zweck: kleiner als der Server-Keepalive (10 s), damit eine Karte ihren
+    /// Inhalt merkbar früher zeigt als das nächste Lebenszeichen; groß genug,
+    /// dass ein 60-s-Werkzeuglauf 20 Anfragen kostet. Grenze: der Abgleich
+    /// läuft nur zwischen dem ersten Werkzeug-Frame und dem Turn-Ende.
+    var liveActivityPollInterval: TimeInterval = 3
+    /// Ein Aussetzer ist normal (das Gerät wechselt das Netz), zwei in Folge
+    /// sind ein Zustand — dann endet der Abgleich (§5.2).
+    var liveActivityMaxConsecutiveFailures = 2
+    /// Deckel des Abgleichs: 200 × 3 s = 10 min, kürzer als
+    /// `streamIdleTimeout` und länger als jeder gemessene Werkzeuglauf (§5.2).
+    var liveActivityMaxPolls = 200
+    /// Eine Seite des Abgleichs; deckt einen Turn mit vielen Werkzeugrunden
+    /// (§5.2). Bewusst derselbe Wert wie die Verlaufsseite des Merges.
+    var liveActivityPageSize: Int { messagePageSize }
+
     /// Frist einer Server-Freigabe, gespiegelt vom Server-Default
     /// (`approvals.timeout`, `gateway/run.py:4071`). Die App zeigt sie an und
     /// sendet nach ihrem Ablauf nichts mehr — die Wahrheit bleibt der Server.
