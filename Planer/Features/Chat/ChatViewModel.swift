@@ -39,11 +39,21 @@ final class ChatViewModel: ObservableObject {
     ///
     /// Zweck: Ein stiller und ein toter Strom sind nach der Rückkehr nicht
     /// unterscheidbar — der Ausgang muss deshalb ehrlich sein: die Verbindung
-    /// ist abgerissen (Verlust), der Turn kann auf dem Server weiterlaufen,
-    /// und „Verlauf neu laden“ ist der Weg dorthin. Grenze: kein
-    /// Erfolgs-Hinweis; der Text wird als Warnung dargestellt
-    /// (`noticeIsInformational == false`), weil er einen Verlust benennt.
-    static let backgroundStreamLostNotice = "Die Verbindung ist im Hintergrund abgerissen. Der Turn kann auf dem Server weiterlaufen — „Verlauf neu laden“ holt ihn."
+    /// ist **möglicherweise** abgerissen (Verlust), der Turn kann auf dem
+    /// Server weiterlaufen, und „Verlauf neu laden“ ist der Weg dorthin.
+    /// Grenze: kein Erfolgs-Hinweis; der Text wird als Warnung dargestellt
+    /// (`noticeIsInformational == false`), weil er einen Verlust benennt. Er
+    /// behauptet keine Ursache, die der Client nicht sehen kann (V5).
+    static let backgroundStreamLostNotice = "Die Verbindung ist im Hintergrund möglicherweise abgerissen. Der Turn kann auf dem Server weiterlaufen — „Verlauf neu laden“ holt ihn."
+
+    /// Hinweis, wenn der Watchdog wegen einer **abgelaufenen** Freigabe
+    /// abgebrochen hat (V1, MARAAA-188).
+    ///
+    /// Zweck: Der Nutzer kann nicht mehr entscheiden (`ToolConfirmationChips`
+    /// rendert für `.expired` nichts); der Turn wird beendet und der
+    /// Serverstand nachgeladen. Grenze: nennt den Grund und den Wiederholweg,
+    /// behauptet keinen Erfolg und keine Ursache auf dem Server.
+    static let backgroundApprovalExpiredNotice = "Die Freigabe ist abgelaufen. Der Turn wurde beendet und der Verlauf nachgeladen — „Verlauf neu laden“ holt den Serverstand."
 
     /// Eine Zeile im Verlauf.
     struct Entry: Identifiable, Equatable {
@@ -219,10 +229,23 @@ final class ChatViewModel: ObservableObject {
     /// auch Kommentare/Keepalives und verworfene Ereignisse (Rev 9). Die
     /// Referenz gehört dem Anbieter, gelesen wird sie hier.
     private let liveness = ChatStreamLiveness()
-    /// E3 (Rev 9, MARAAA-188): `true`, sobald der Watchdog den Turn hart
-    /// geschlossen hat. `run` darf danach weder melden noch mergen — sonst
-    /// überschriebe der Abbruch-Fehler die ehrliche Meldung.
-    private var didAbandonTurn = false
+    /// E3 (Rev 9, MARAAA-188): Generation, deren Strom der Watchdog hart
+    /// geschlossen hat; `nil` = keine. `run` darf für **genau diese** Generation
+    /// weder melden noch mergen — sonst überschriebe der Abbruch-Fehler die
+    /// ehrliche Meldung.
+    ///
+    /// V2: turn-gebunden statt modellweit. Ein neuer Turn setzt den Riegel in
+    /// `send()` zurück und kann von einem Zombie-Task des alten nicht getroffen
+    /// werden.
+    private var abandonedGeneration: Int?
+    /// Monoton steigende Nummer des zuletzt in `send()` begonnenen Turns.
+    ///
+    /// Zweck (V2): `run` und der Watchdog führen ihre Nummer als Konstante mit.
+    /// Jede Turn-Zustandsänderung prüft `generation == turnGeneration`; ein
+    /// alter Task, der das harte Schließen überlebt, kann so weder den
+    /// `defer`-Zustand des neuen Turns zurücksetzen noch dessen Watchdog
+    /// abbrechen oder in dessen Merge schreiben.
+    private var turnGeneration = 0
     /// Höchste bereits dargestellte Nachrichten-ID; `0` ist die Baseline einer
     /// geladenen, aber leeren Session (E5) — nie eine echte Server-ID.
     private var watermark: Int?
@@ -281,7 +304,11 @@ final class ChatViewModel: ObservableObject {
     }
 
     deinit {
-        // A1: kein Task überlebt das Modell (Rev 9, MARAAA-188).
+        // A1: der Watchdog wird hier abgebrochen. Grenze (V6): solange eine
+        // Runde in `Task.sleep` liegt, hält die Schleife `self` **nicht** —
+        // sie arbeitet mit einem Schnappschuss (siehe
+        // `scheduleResumeWatchdog`); nur die laufende Runde selbst kann den
+        // Abbruch noch um einen Schritt verzögern.
         resumeWatchdogTask?.cancel()
         for observer in lifecycleObservers {
             NotificationCenter.default.removeObserver(observer)
@@ -598,9 +625,12 @@ final class ChatViewModel: ObservableObject {
         cancelResumeWatchdog()
         streamEventCount = 0
         // Rev 9: auch der Zeilenzähler und der Abbruch-Riegel gehören zu genau
-        // diesem Turn.
+        // diesem Turn. V2: die Nummer steigt **vor** dem Task; `run` führt sie
+        // als Konstante mit, damit ein alter Task den neuen nicht trifft.
+        turnGeneration += 1
+        let generation = turnGeneration
         liveness.reset()
-        didAbandonTurn = false
+        abandonedGeneration = nil
         mergeFallbackDuration = nil
         createdSessionThisTurn = false
         receivedSessionHeader = false
@@ -611,7 +641,7 @@ final class ChatViewModel: ObservableObject {
         isStreaming = true
         turnStartedAt = Date()
         offersHistoryReload = false
-        streamTask = Task { await run(text: text) }
+        streamTask = Task { await run(text: text, generation: generation) }
     }
 
     /// Bricht die laufende Antwort ab. Ein Abbruch ist kein Fehler und kein
@@ -766,41 +796,98 @@ final class ChatViewModel: ObservableObject {
     /// weiter. Ohne Frist bliebe `isStreaming` true und der Composer gesperrt.
     /// Grenze: greift nur, solange sich das Lebenszeichen nicht ändert; ein
     /// lebender Strom bleibt unangetastet (E15/B14). Solange eine Freigabe
-    /// wartet, läuft die Frist weiter statt abzubrechen.
+    /// dieses Turns **entscheidbar** ist, läuft die Frist weiter statt
+    /// abzubrechen; eine nur noch abgelaufene Freigabe ist kein Grund zu
+    /// warten (V1) und endet im Abbruch-Pfad mit eigenem Wortlaut.
     ///
     /// Aufbau: **eine** Task mit Schleife — je Runde `sleep(grace)`, danach
     /// Lebenszeichen vergleichen; hat es sich geändert, beginnt die nächste
     /// Runde, sonst ist der Strom tot. Kein Task je Ereignis, genau ein
-    /// gespeicherter Task (`resumeWatchdogTask`).
+    /// gespeicherter Task (`resumeWatchdogTask`). V2: die Generation wird vor
+    /// der Schleife festgehalten; V6: über den `sleep` hält der Rumpf nur
+    /// einen Schnappschuss, nicht `self`.
     private func scheduleResumeWatchdog() {
         cancelResumeWatchdog()
+        let generation = turnGeneration
         resumeWatchdogTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
-                let marker = self.resumeLiveness
-                let gracePeriod = max(self.configuration.backgroundResumeGracePeriod, 0)
+                guard let snapshot = self?.resumeWatchdogSnapshot() else { return }
                 do {
                     try await Task.sleep(
-                        nanoseconds: UInt64(gracePeriod * 1_000_000_000)
+                        nanoseconds: UInt64(snapshot.gracePeriod * 1_000_000_000)
                     )
                 } catch {
                     // Abgebrochen: der Turn ist zu Ende (run-Defer) oder der
                     // Nutzer ist wieder im Hintergrund.
                     return
                 }
-                guard !Task.isCancelled, self.isStreaming else { return }
-                // Eine wartende Freigabe ist legitime Stille (bis
-                // `approvalTimeout`) und kein toter Strom: die Frist beginnt
-                // neu, statt den Turn abzubrechen — sonst verlöre der Nutzer
-                // die Freigabe-Chips.
-                if self.turnPhase == .awaitingApproval { continue }
+                guard !Task.isCancelled, let self, generation == self.turnGeneration else { return }
+                guard self.isStreaming else { return }
+                // V1: Nur eine **entscheidbare** Freigabe dieses Turns ist
+                // legitime Stille. `.expired` wartet zwar serverseitig weiter
+                // (`waitsForUser`), ist für den Nutzer aber nicht mehr zu
+                // beantworten — die Ausnahme darf ihn nicht bis
+                // `streamIdleTimeout` (900 s) sperren.
+                if self.hasDecidableApproval { continue }
                 // Neues Lebenszeichen in dieser Runde ⇒ der Strom lebt, die
                 // nächste Frist beginnt. Sonst: seit einer vollen Frist still.
+                let marker = snapshot.marker
                 if self.resumeLiveness != marker { continue }
-                await self.abandonDeadStreamIfNeeded()
+                await self.abandonDeadStreamIfNeeded(
+                    generation: generation,
+                    approvalExpired: self.hasExpiredApproval
+                )
                 return
             }
         }
+    }
+
+    /// Was eine Watchdog-Runde über den `sleep` hinweg braucht (V2/V6).
+    private struct ResumeWatchdogSnapshot {
+        let marker: ResumeLiveness
+        let gracePeriod: TimeInterval
+    }
+
+    /// `nil` = kein laufender Turn; die Runde endet dann ohne Abbruch.
+    private func resumeWatchdogSnapshot() -> ResumeWatchdogSnapshot? {
+        guard isStreaming else { return nil }
+        return ResumeWatchdogSnapshot(
+            marker: resumeLiveness,
+            gracePeriod: max(configuration.backgroundResumeGracePeriod, 0)
+        )
+    }
+
+    /// `true`, solange eine Freigabe **dieses** Turns noch entscheidbar ist
+    /// (abgeleitete Phase `.open`).
+    ///
+    /// Grenze: bewusst `acceptsDecision`, nicht `waitsForUser` — `.expired`
+    /// wartet serverseitig weiter, hat aber keine Chips mehr (V1).
+    private var hasDecidableApproval: Bool {
+        entries.contains { entry in
+            entry.kind == .approval
+                && turnEntryIDs.contains(entry.id)
+                && derivedApprovalPhase(of: entry).acceptsDecision
+        }
+    }
+
+    /// `true`, wenn eine Freigabe dieses Turns nach Client-Frist abgelaufen ist.
+    private var hasExpiredApproval: Bool {
+        entries.contains { entry in
+            entry.kind == .approval
+                && turnEntryIDs.contains(entry.id)
+                && derivedApprovalPhase(of: entry) == .expired
+        }
+    }
+
+    /// Die abgeleitete Phase eines Eintrags — eine Stelle für Karte, Riegel
+    /// und Watchdog.
+    private func derivedApprovalPhase(of entry: Entry) -> ApprovalPhase {
+        ApprovalPhase.derive(
+            stored: entry.approvalPhase,
+            receivedAt: entry.approvalReceivedAt,
+            timeout: configuration.approvalTimeout,
+            now: Date()
+        )
     }
 
     /// Bricht den Watchdog ab; idempotent. Grenze: der Antwortstrom bleibt
@@ -818,16 +905,23 @@ final class ChatViewModel: ObservableObject {
     /// Grenze: kein zweiter Strom und keine zweite Merge-Logik. Der Abbruch ist
     /// ein technischer, kein Nutzerabbruch; der Ausgang ist ein **Verlust**,
     /// kein Erfolg (E1) — deshalb der eigene Text und der Wiederholweg.
-    private func abandonDeadStreamIfNeeded() async {
+    /// `approvalExpired` wählt den Grund im Text (V1); beide Texte nennen den
+    /// Wiederholweg.
+    private func abandonDeadStreamIfNeeded(generation: Int, approvalExpired: Bool) async {
+        // V2: nur der aktuelle Turn darf geschlossen werden. Ein Watchdog
+        // eines alten Turns hat hier nichts zu tun.
+        guard generation == turnGeneration else { return }
         // Vor dem Abbruch freigeben: das Turn-Ende ruft `cancelResumeWatchdog()`
         // und darf diesen Task nicht selbst kündigen — er lädt gleich nach.
         resumeWatchdogTask = nil
         guard isStreaming else { return }
 
-        // E3: `run` darf ab hier weder melden noch mergen — sonst überschriebe
-        // „Antwort abgebrochen.“ die ehrliche Meldung oder ein Merge den
-        // gerade geladenen Serverstand.
-        didAbandonTurn = true
+        // E3/V2: `run` darf ab hier weder melden noch mergen — sonst
+        // überschriebe „Antwort abgebrochen.“ die ehrliche Meldung oder ein
+        // Merge den gerade geladenen Serverstand. Der Riegel gilt nur für
+        // **diese** Generation; `send()` setzt ihn für den nächsten Turn
+        // zurück.
+        abandonedGeneration = generation
         let runningTask = streamTask
         runningTask?.cancel()
         // E3: begrenztes Warten statt eines Waits auf den Task-Wert. Der Task
@@ -837,7 +931,7 @@ final class ChatViewModel: ObservableObject {
 
         // E3: den Turn-Zustand hart schließen, **bevor** nachgeladen wird. Das
         // ist idempotent zum `defer` in `run` (gleiche Zuweisungen, kein
-        // zweiter Effekt); `merge` und `handle` sind durch `didAbandonTurn`
+        // zweiter Effekt); `merge` und `handle` sind durch die Generation
         // gesperrt.
         isStreaming = false
         turnStartedAt = nil
@@ -853,7 +947,9 @@ final class ChatViewModel: ObservableObject {
             // ehrliche Verlust-Text ersetzt keine Ursache.
             return
         }
-        notice = Self.backgroundStreamLostNotice
+        notice = approvalExpired
+            ? Self.backgroundApprovalExpiredNotice
+            : Self.backgroundStreamLostNotice
         offerHistoryReload()
     }
 
@@ -1006,33 +1102,44 @@ final class ChatViewModel: ObservableObject {
         case createFailed
     }
 
-    private func run(text: String) async {
+    private func run(text: String, generation: Int) async {
         defer {
-            isStreaming = false
-            statusNote = nil
-            createdSessionThisTurn = false
-            turnStartedAt = nil
-            // R-CH5: beide Turn-Felder ueberleben den Turn nicht mehr.
-            streamRequested = false
-            mergeFallbackDuration = nil
-            // A1 (Rev 9): kein Watchdog überlebt seinen Turn.
-            cancelResumeWatchdog()
+            // V2: Nur der **aktuelle** Turn schließt seinen Zustand. Ein
+            // Zombie-Task eines verworfenen Turns lässt den neuen unberührt.
+            if generation == turnGeneration {
+                isStreaming = false
+                statusNote = nil
+                createdSessionThisTurn = false
+                turnStartedAt = nil
+                // R-CH5: beide Turn-Felder ueberleben den Turn nicht mehr.
+                streamRequested = false
+                mergeFallbackDuration = nil
+                // A1 (Rev 9): kein Watchdog überlebt seinen Turn.
+                cancelResumeWatchdog()
+            }
         }
         do {
+            // V2: ein alter Turn startet keine Serverarbeit mehr. Der Riegel
+            // steht vor jedem `await`, weil ein abgebrochener Task aus einem
+            // laufenden Request zurückkehren kann.
+            guard generation == turnGeneration, abandonedGeneration != generation else { return }
             // O7: erst prüfen, ob der Server das Profil ausliefert — ein 404
             // blockiert den Turn mit einer ehrlichen Meldung (F-R6-4).
             try await api.probeProfile()
-            let sessionID = try await prepareSession()
-            try await streamTurn(sessionID: sessionID, text: text)
+            guard generation == turnGeneration, abandonedGeneration != generation else { return }
+            let sessionID = try await prepareSession(generation: generation)
+            guard generation == turnGeneration, abandonedGeneration != generation else { return }
+            try await streamTurn(sessionID: sessionID, text: text, generation: generation)
             // E3 (Rev 9, MARAAA-188): ein Abbruch zwischen letztem Ereignis und
             // Merge darf keinen Merge mehr auslösen — der Watchdog hat den Turn
             // womöglich schon geschlossen und den Serverstand geladen.
             try Task.checkCancellation()
         } catch {
-            // E3: Hat der Watchdog den Turn bereits hart geschlossen, ist
-            // dieser Fehler (sein eigener Abbruch) keine Meldung mehr wert —
-            // sonst überschriebe „Antwort abgebrochen.“ den ehrlichen Text.
-            if didAbandonTurn { return }
+            // E3/V2: Hat der Watchdog **diesen** Turn bereits hart geschlossen
+            // oder ist ein neuer Turn gestartet, ist dieser Fehler (der
+            // Abbruch) keine Meldung mehr wert — sonst überschriebe
+            // „Antwort abgebrochen.“ den ehrlichen Text.
+            guard generation == turnGeneration, abandonedGeneration != generation else { return }
             // R1 (Rev 8 §4.4): Ein leerer Strom nach vollständig gelesener
             // Antwort ist kein „nichts gesendet“. Vor der F8-Meldung steht
             // genau ein Nachladeversuch über den vorhandenen Verlaufsweg.
@@ -1078,14 +1185,20 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Stellt sicher, dass eine Sitzung existiert, die im Verlauf sichtbar ist.
-    private func prepareSession() async throws -> String {
+    ///
+    /// V2: `generation` schützt die schreibenden Schritte. Ein abgebrochener
+    /// Task kann aus `api.session`/`api.createSession` zurückkehren; ohne
+    /// Riegel überschriebe er `currentSession` eines neuen Turns.
+    private func prepareSession(generation: Int) async throws -> String {
         if let current = currentSession {
             do {
                 let fresh = try await api.session(id: current.id)
+                try ensureCurrentTurn(generation)
                 currentSession = fresh
                 return fresh.id
             } catch {
                 if isNotFound(error) {
+                    try ensureCurrentTurn(generation)
                     currentSession = nil
                     entries = []
                     watermark = nil
@@ -1100,6 +1213,7 @@ final class ChatViewModel: ObservableObject {
 
         do {
             let created = try await api.createSession()
+            try ensureCurrentTurn(generation)
             currentSession = created
             // E5/M4: eine neue Session hat keine Historie; die Baseline `0`
             // ist erlaubt, weil dieser Turn sie selbst angelegt hat.
@@ -1114,6 +1228,14 @@ final class ChatViewModel: ObservableObject {
                 throw TurnFailure.createFailed
             }
             throw error
+        }
+    }
+
+    /// V2: wirft `CancellationError`, wenn `generation` nicht mehr der
+    /// aktuelle Turn ist (oder der Watchdog ihn geschlossen hat).
+    private func ensureCurrentTurn(_ generation: Int) throws {
+        guard generation == turnGeneration, abandonedGeneration != generation else {
+            throw CancellationError()
         }
     }
 
@@ -1147,18 +1269,27 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func streamTurn(sessionID: String, text: String) async throws {
+    private func streamTurn(sessionID: String, text: String, generation: Int) async throws {
         var pendingEngine: ChatEngine?
         var agentEntryID: UUID?
         var didFinish = false
         // H1: die Antwort-ID kann von der gesendeten abweichen.
         var effectiveSessionID = sessionID
-        defer { voice?.finishAssistantStream() }
+        defer {
+            // V2: ein später alter Turn beendet nicht das Vorlesen des neuen.
+            if generation == turnGeneration { voice?.finishAssistantStream() }
+        }
 
         // R1: ab hier hat der Server die Anfrage erhalten; nur dann darf ein
         // Nachladen des Verlaufs erwogen werden (Rev 8 §3.2.1).
+        // V2: ein alter Turn öffnet keinen Strom mehr und setzt den Merker des
+        // neuen nicht.
+        guard generation == turnGeneration, abandonedGeneration != generation else { return }
         streamRequested = true
         for try await event in provider.stream(sessionID: sessionID, userText: text) {
+            // V2: ein Ereignis aus einem nicht mehr aktuellen Turn darf den
+            // neuen nicht füttern (Lebenszeichen, Einträge, Merge).
+            guard generation == turnGeneration, abandonedGeneration != generation else { return }
             // A1 (Rev 9, MARAAA-188): jedes Ereignis ist ein Lebenszeichen —
             // der Watchdog nach der Rückkehr zählt darauf.
             streamEventCount += 1
@@ -1218,6 +1349,9 @@ final class ChatViewModel: ObservableObject {
         // F15: Der Server hat keine Antwort-ID geliefert, und es gab noch keinen
         // Verlauf, der fortgesetzt werden könnte. Ein F12-Fehler hat Vorrang;
         // der Merge-Hinweis darf diese Warnung nicht überschreiben.
+        // V2: nach dem Ende des Stroms gilt derselbe Riegel — ein alter Turn
+        // schreibt weder Hinweis noch Merge in den neuen.
+        guard generation == turnGeneration, abandonedGeneration != generation else { return }
         if !receivedSessionHeader, turnHistoryWasEmpty, notice == nil {
             notice = "Der Verlauf wird nicht fortgesetzt (Sitzungs-Header fehlt)."
         }
@@ -1231,6 +1365,12 @@ final class ChatViewModel: ObservableObject {
         mergeFallbackDuration = measured
 
         if didFinish {
+            // V2: der Merge gehört zu genau diesem Turn. Die Generation hat
+            // `merge` beim Eintritt festgehalten und prüft sie nach dem
+            // `await` erneut; hier steht der billige Riegel davor.
+            guard generation == turnGeneration, abandonedGeneration != generation else {
+                return
+            }
             switch await merge(sessionID: effectiveSessionID) {
             case .nothingNew:
                 // F12: eine bereits gesetzte Fehlermeldung hat Vorrang.
@@ -1370,11 +1510,17 @@ final class ChatViewModel: ObservableObject {
 
     @discardableResult
     private func merge(sessionID: String) async -> MergeOutcome {
-        // E3 (Rev 9, MARAAA-188): Ein vom Watchdog verworfener Turn merged
+        // E3/V2 (Rev 9, MARAAA-188): Ein vom Watchdog verworfener Turn merged
         // nicht mehr. Sein Serverstand ist bereits über
         // `reconcileAfterBackground` geladen; ein spätes Ergebnis — oder eine
         // späte Fehlermeldung aus `catch` — würde ihn überschreiben.
-        guard !didAbandonTurn else { return .skipped }
+        //
+        // Die Generation wird hier beim Eintritt festgehalten: der Aufruf
+        // erfolgt auf dem Main-Actor ohne `await` davor, also noch im Turn, den
+        // der Aufrufer geprüft hat. Ein alter Task kann damit nie die Nummer
+        // eines inzwischen gestarteten Turns erben.
+        let generation = turnGeneration
+        guard abandonedGeneration != generation else { return .skipped }
         // E5/M4: Ein Merge mit `watermark == nil` ist nur für eine in genau
         // diesem Turn angelegte Session zulässig. Der Fall „openSession
         // fehlgeschlagen, dann gesendet“ ist durch `canSend` gesperrt; dieser
@@ -1392,6 +1538,12 @@ final class ChatViewModel: ObservableObject {
                 offset: 0,
                 order: .latest
             )
+            // V2: nach dem `await` kann der Watchdog diesen Turn geschlossen
+            // oder ein neuer Turn begonnen haben. Dann darf das späte Ergebnis
+            // weder Einträge noch `watermark` des neuen Turns überschreiben.
+            guard generation == turnGeneration, abandonedGeneration != generation else {
+                return .skipped
+            }
             // R2, Rang 1: aus der **ganzen** Seite, weil die zugehörige
             // User-Nachricht vor dem `watermark` liegen kann (Rev 8 §4.2).
             let durations = Self.generationDurations(in: page.messages)

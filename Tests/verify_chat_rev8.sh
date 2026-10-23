@@ -345,7 +345,7 @@ rescue_section() {
         "R13 F12-Zweig steht vor der Leer-Pruefung"
 
     # R14: Rettung vor handle im catch von run.
-    section_order "$vm" 'private func run(text: String) async' 'private func rescueEmptyTurn' \
+    section_order "$vm" 'private func run(text: String, generation: Int) async' 'private func rescueEmptyTurn' \
         'rescueEmptyTurn()' 'handle(error, text: text)' \
         "R14 rescueEmptyTurn() steht vor handle(error, text: text)"
 
@@ -402,11 +402,11 @@ rescue_section() {
     # R20 (R-CH5, N1/N2): beide Turn-Felder fallen im `defer` von `run`
     # zurueck — nicht irgendwo im Rumpf, sondern im defer-Block selbst.
     section_block_has "$vm" \
-        'private func run(text: String) async' 'private func rescueEmptyTurn' \
+        'private func run(text: String, generation: Int) async' 'private func rescueEmptyTurn' \
         'defer {' '^[[:space:]]+streamRequested = false$' \
         "R20a defer setzt streamRequested zurueck"
     section_block_has "$vm" \
-        'private func run(text: String) async' 'private func rescueEmptyTurn' \
+        'private func run(text: String, generation: Int) async' 'private func rescueEmptyTurn' \
         'defer {' '^[[:space:]]+mergeFallbackDuration = nil$' \
         "R20b defer setzt mergeFallbackDuration zurueck"
 }
@@ -625,21 +625,24 @@ global_section() {
     fi
 
     # X5: Provider, SSE und DTOs im CH4-Commit unveraendert.
-    # Anker ist wie bei X1/X2 der feste CH4-Bereich: die Aussage „Rev 8 hat
+    # HISTORISCH (V6, nur fuer den CH4-Commit ac109f0): die Aussage „Rev 8 hat
     # diese drei Dateien nicht angefasst“ gilt fuer den CH4-Commit, nicht fuer
     # jeden spaeteren Commit auf main (MARAAA-186). Rev 9 (MARAAA-188) aendert
     # Provider und SSE bewusst (ein zu grosses SSE-Ereignis wird verworfen
     # statt zum Turn-Fehler); ein Vergleich gegen HEAD wuerde die alte Zusage
     # mit der neuen Arbeit umdrehen, statt sie zu pruefen.
+    # Diese Zeile ist daher **keine lebende Grenze** fuer HEAD; die lebende
+    # Grenze der DTOs ist X5b. Sie bleibt als datierter Nachweis des damaligen
+    # Stands stehen.
     # Nachtrag Runde 2 (Befund 5): der Anker wird **vor** dem Vergleich
     # validiert. Fehlt er, ist X5 rot — ein `git diff` mit unaufloesbarem
     # Bereich liefert leer und waere sonst vakuum-gruen.
     if [[ "$ch4_anchor" -eq 0 ]]; then
-        bad "X5a CH4-Anker $ch4_commit nicht auffindbar — Unveraendertheit nicht pruefbar"
+        bad "X5a (historisch) CH4-Anker $ch4_commit nicht auffindbar — Unveraendertheit nicht pruefbar"
     elif [[ -z "$(git diff --stat "$ch4_range" -- "$prov" "$sse" "$dtos" 2>/dev/null || true)" ]]; then
-        pass "X5a ChatStreamProvider/ChatSSE/ChatDTOs im CH4-Commit unveraendert"
+        pass "X5a (historisch, CH4-Bereich) ChatStreamProvider/ChatSSE/ChatDTOs unveraendert"
     else
-        bad "X5a unerlaubte Aenderung an Provider/SSE/DTOs: $(git diff --name-only "$ch4_range" -- "$prov" "$sse" "$dtos" | tr '\n' ' ')"
+        bad "X5a (historisch) unerlaubte Aenderung an Provider/SSE/DTOs: $(git diff --name-only "$ch4_range" -- "$prov" "$sse" "$dtos" | tr '\n' ' ')"
     fi
 
     # X5b (Runde 2): die DTO-Vertraege zusaetzlich gegen HEAD. Der feste
