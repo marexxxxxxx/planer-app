@@ -119,10 +119,23 @@ section_count() {
 # Zeile, auf der die Klammerung wieder auf 0 steht. So laesst sich ein `defer`
 # von gleichnamigen Bloecken davor und dahinter unterscheiden. Die Grenze ist
 # woertlich (index()); `-v` bekommt deshalb kein Regex-Escaping.
+#
+# Bewusst ein einziger awk-Lauf ueber die Datei statt `section | awk`:
+# der fruehere `exit` des Lesers beendete den Schreiber nicht, dieser lief
+# in eine geschlossene Pipe und der Lauf starb mit rc=141 (SIGPIPE, Flake
+# F7/F1 in L10a). Ein Prozess kann sich nicht selbst die Pipe schliessen.
 section_block() {
-    section "$1" "$2" "$3" | awk -v s="$4" '
-        !f && index($0, s) > 0 { f = 1 }
-        f {
+    awk -v s="$2" -v e="$3" -v o="$4" '
+        !in_section && index($0, s) > 0 { in_section = 1 }
+        in_section {
+            if (!f) {
+                if (index($0, o) > 0) {
+                    f = 1
+                } else {
+                    if (index($0, e) > 0) in_section = 0
+                    next
+                }
+            }
             print
             line = $0
             opens = gsub(/\{/, "{", line)
@@ -130,7 +143,7 @@ section_block() {
             if (opens > 0) seen = 1
             depth += opens - closes
             if (seen && depth <= 0) exit
-        }'
+        }' "$1"
 }
 
 section_block_has() {
@@ -145,6 +158,58 @@ section_block_has() {
     else
         bad "$label  [$file, Block /$open/ in /$start/../$end/ ~ /$pattern/]"
     fi
+}
+
+# Rumpf zwischen zwei woertlichen Zeilenmarken eines Abschnitts: ab der Zeile
+# **nach** $4 bis **vor** die Zeile mit $5. Fuer Verzweigungen, deren Koerper
+# nur eine Zeile belegt (`} else {` .. `polls += 1`), wo section_block wegen
+# der Klammerung auf derselben Zeile nichts liefern kann.
+#
+# Wie section_block ein einziger awk-Lauf: ein `section | awk` mit fruehem
+# `exit` wuerde den Schreiber wieder in eine geschlossene Pipe laufen lassen
+# (rc=141, Flake F7/F1).
+section_between() {
+    awk -v s="$2" -v e="$3" -v a="$4" -v b="$5" '
+        !in_section && index($0, s) > 0 { in_section = 1 }
+        in_section {
+            if (!f) {
+                if (index($0, a) > 0) { f = 1; next }
+                if (index($0, e) > 0) in_section = 0
+                next
+            }
+            if (index($0, b) > 0) exit
+            print
+        }' "$1"
+}
+
+section_between_has() {
+    local file="$1" start="$2" end="$3" from="$4" to="$5" pattern="$6" label="$7" body
+    body="$(section_between "$file" "$start" "$end" "$from" "$to")"
+    if [[ -z "$body" ]]; then
+        bad "$label  [$file: Rumpf /$from/../$to/ in /$start/../$end/ nicht gefunden]"
+        return
+    fi
+    if grep -qE "$pattern" <<<"$body"; then
+        pass "$label"
+    else
+        bad "$label  [$file, Rumpf /$from/../$to/ ~ /$pattern/]"
+    fi
+}
+
+# Erste Zeilennummer (relativ zum Abschnitt) einer woertlichen Zeile. Fuer
+# Reihenfolge-Aussagen wie "Cursor erst nach dem Filter fortschreiben".
+section_line() {
+    local file="$1" start="$2" end="$3" needle="$4" body
+    body="$(section "$file" "$start" "$end")"
+    awk -v p="$needle" 'index($0, p) > 0 { print NR; exit }' <<<"$body"
+}
+
+# Trefferzahl im Rumpf zwischen zwei Zeilenmarken (siehe section_between_has).
+section_between_count() {
+    local file="$1" start="$2" end="$3" from="$4" to="$5" pattern="$6" body n
+    body="$(section_between "$file" "$start" "$end" "$from" "$to")"
+    n="$(grep -cE "$pattern" <<<"$body" 2>/dev/null || true)"
+    echo "${n:-0}" | tr -d ' '
 }
 
 # ---------------------------------------------------------------------------
@@ -298,6 +363,10 @@ section_has "$vm" "$running_start" "$sync_start" 'turnEntryIDs\.contains' \
     'L18b nur Karten des laufenden Turns zaehlen'
 section_has "$vm" "$running_start" "$sync_start" 'toolStatus == \.running' \
     'L18c nur laufende Karten halten den Abgleich wach'
+# M1: die Anfrage steht unter `if running`; `if true` pollt jeden Takt und
+# hebt die Pause auf (Wartezeit auf das Modell bleibt nicht lastfrei).
+section_has "$vm" "$sync_start" "$sync_end" '^[[:space:]]*if running \{' \
+    'L18d Anfrage nur bei laufendem Werkzeug: Verzweigung prueft `running`, nicht `true`'
 
 # L19: ein lokaler Cursor begrenzt die Uebernahme; er wird einmal aus dem
 # Wasserstand gesetzt, wandert vorwaerts und laesst den Merge-Wasserstand in Ruhe.
@@ -309,22 +378,49 @@ else
 fi
 section_has "$vm" "$sync_start" "$sync_end" '\$0\.id > cursor' \
     'L19b Cursor begrenzt die neuen Zeilen'
-section_has "$vm" "$sync_start" "$sync_end" 'cursor = max\(cursor,' \
-    'L19c Cursor wandert vorwaerts'
-section_lacks "$vm" "$sync_start" "$sync_end" '(^|[^A-Za-z])watermark =' \
-    'L19d Wasserstand des Abschluss-Merges bleibt unberuehrt'
+# M3: der Cursor muss auf die neueste gesehene ID wandern; `max(cursor,
+# cursor)` laesst ihn stehen und jede Runde uebernimmt alle Zeilen erneut.
+section_has "$vm" "$sync_start" "$sync_end" 'cursor = max\(cursor, newest\)' \
+    'L19c Cursor wandert auf die neueste ID fort (`cursor = max(cursor, newest)`)'
+# M4: erst filtern, dann fortschreiben. Zieht die Fortschreibung vor den
+# Filter, ist `fresh` immer leer und die Zeilen werden uebersprungen.
+fresh_line="$(section_line "$vm" "$sync_start" "$sync_end" 'let fresh = page.messages')"
+cursor_line="$(section_line "$vm" "$sync_start" "$sync_end" 'cursor = max(cursor')"
+if [[ -n "$fresh_line" && -n "$cursor_line" && "$fresh_line" -lt "$cursor_line" ]]; then
+    pass "L19e Filter liest den Cursor vor der Fortschreibung (Zeile $fresh_line < $cursor_line)"
+else
+    bad "L19e Cursor wird vor dem Filter fortgeschrieben (fresh: ${fresh_line:-fehlt}, cursor: ${cursor_line:-fehlt})"
+fi
+# M6: auch `watermark=...` ohne Leerzeichen ist eine Schreibzugriff auf den
+# Wasserstand des Abschluss-Merges und muss rot werden.
+section_lacks "$vm" "$sync_start" "$sync_end" 'watermark[[:space:]]*=[^=]' \
+    'L19d Wasserstand des Abschluss-Merges bleibt unberuehrt (auch `watermark=` ohne Leerzeichen)'
 
 # L20: nach dem letzten Werkzeug genau eine Abschlussrunde, dann Pause.
 section_has "$vm" "$sync_start" "$sync_end" 'else if finalRoundPending \{' \
     'L20a Abschlussrunde nach dem letzten Werkzeug ist vorhanden'
 section_has "$vm" "$sync_start" "$sync_end" 'var finalRoundPending = true' \
     'L20b Abschlussrunde ist ab dem Start offen'
-final_consume="$(section_count "$vm" "$sync_start" "$sync_end" 'finalRoundPending = false')"
+final_consume="$(section_between_count "$vm" "$sync_start" "$sync_end" \
+    '} else if finalRoundPending {' '} else {' 'finalRoundPending = false')"
 if [[ "$final_consume" -eq 1 ]]; then
-    pass "L20c Abschlussrunde wird genau einmal verbraucht"
+    pass "L20c Abschlussrunde wird im Abschlusszweig genau einmal verbraucht"
 else
     bad "L20c Abschlussrunde wird nicht genau einmal verbraucht (Treffer: $final_consume, erwartet: 1)"
 fi
+# M2: ein spaeteres Werkzeug muss die Abschlussrunde erneut scharf stellen.
+# Neutralisiert man dieses Wieder-Scharfstellen, verliert der letzte Lauf sein
+# Ergebnis. Der Block haengt an `let running`, nicht an `if running` — damit
+# bleibt dieser Befund unabhaengig von M1.
+section_block_has "$vm" "$sync_start" "$sync_end" 'let running = hasRunningToolCard' \
+    'finalRoundPending = true' \
+    'L20d laufendes Werkzeug schaerft die Abschlussrunde erneut scharf'
+# M7: ohne Werkzeug und ohne offene Abschlussrunde endet die Runde vor der
+# Anfrage. Fehlt das `continue`, faellt der Ablauf in `polls += 1` und pollt
+# weiter — die Pause entfaellt.
+section_between_has "$vm" "$sync_start" "$sync_end" '} else {' 'polls += 1' \
+    '^[[:space:]]*continue$' \
+    'L20e Pause beendet die Runde vor der Anfrage (`continue` im else-Zweig)'
 
 # ---------------------------------------------------------------------------
 
