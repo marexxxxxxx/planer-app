@@ -1485,6 +1485,16 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Live-Verlaufsabgleich (spec-chat-live-activity §5.1)
 
+    /// `true`, solange eine Werkzeugkarte des **laufenden** Turns läuft.
+    ///
+    /// Grenze: nur Karten dieses Turns (`turnEntryIDs`); eine Karte aus einem
+    /// früheren Turn darf den Abgleich nicht wach halten (F1).
+    private var hasRunningToolCard: Bool {
+        entries.contains {
+            turnEntryIDs.contains($0.id) && $0.kind == .tool && $0.toolStatus == .running
+        }
+    }
+
     /// Startet den Abgleich, wenn dieser Turn noch keinen hat.
     ///
     /// Grenze: höchstens einmal je Turn; ohne bekannte Sitzung oder ohne
@@ -1498,14 +1508,26 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Holt den Verlauf, solange der Turn läuft, und füllt die Karten daraus.
+    /// Holt den Verlauf, solange ein Werkzeug des Turns läuft, und füllt die
+    /// Karten daraus.
     ///
-    /// Grenze: eine Leseanfrage je Takt, kein Schreiben, kein zweiter Merge.
-    /// Die Schleife endet bei Turn-Wechsel, Turn-Ende, zwei Fehlern in Folge
-    /// und am Deckel; die Task selbst beendet `streamTurn`.
+    /// Grenze: eine Leseanfrage je Takt **und nur während eines Werkzeuglaufs**;
+    /// nach dem letzten Werkzeug genau eine Abschlussrunde, danach keine
+    /// Anfrage mehr bis zum nächsten laufenden Werkzeug (F1, §5.2). Ein lokaler
+    /// Cursor verhindert, dass dieselben Zeilen in jeder Runde erneut
+    /// übernommen werden; der `watermark` des Abschluss-Merges bleibt
+    /// unangetastet. Kein Schreiben, kein zweiter Merge.
     private func liveActivitySync(sessionID: String, generation: Int) async {
         var consecutiveFailures = 0
         var polls = 0
+        // F1: lokaler Cursor — höchste in dieser Schleife gesehene ID.
+        var cursor = watermark ?? -1
+        // F1: die Abschlussrunde holt das Ergebnis des zuletzt beendeten
+        // Werkzeugs. Sie ist ab dem Start offen: der Abgleich beginnt mit
+        // einem Werkzeug-Frame, und ein sehr kurzer Lauf darf sein Ergebnis
+        // nicht verlieren, wenn das Ende vor der ersten Runde eintrifft.
+        var finalRoundPending = true
+
         while polls < configuration.liveActivityMaxPolls {
             if Task.isCancelled { return }
             guard generation == turnGeneration,
@@ -1521,6 +1543,20 @@ final class ChatViewModel: ObservableObject {
                   isStreaming
             else { return }
 
+            // F1: erst nach dem Takt entscheiden, ob es etwas zu holen gibt.
+            // Ohne laufendes Werkzeug (und ohne offene Abschlussrunde) keine
+            // Anfrage — die Wartezeit auf das Modell bleibt lastfrei.
+            let running = hasRunningToolCard
+            if running {
+                finalRoundPending = true
+            } else if finalRoundPending {
+                // Abschlussrunde: das Ergebnis der letzten Werkzeugzeile steht
+                // erst nach dem Ende des Werkzeugs im Verlauf.
+                finalRoundPending = false
+            } else {
+                continue
+            }
+
             polls += 1
             do {
                 let page = try await api.messages(
@@ -1535,9 +1571,14 @@ final class ChatViewModel: ObservableObject {
                 guard generation == turnGeneration,
                       abandonedGeneration != generation
                 else { return }
+                // Cursor vor dem Anwenden lesen: die Grenze ist der Stand der
+                // letzten Runde, nicht der dieser.
                 let fresh = page.messages
-                    .filter { $0.id > (watermark ?? -1) }
+                    .filter { $0.id > cursor }
                     .sorted { $0.id < $1.id }
+                if let newest = page.messages.map(\.id).max() {
+                    cursor = max(cursor, newest)
+                }
                 applyHistoryDelta(fresh)
             } catch {
                 if error is CancellationError { return }

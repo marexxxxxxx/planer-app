@@ -4,7 +4,7 @@
 #
 # Grundlage: `docs/spec-chat-live-activity.md` (MARAAA-203), §5.1 (Bausteine),
 # §5.2 (Defaults) und §6.1 (Pruefungen L1-L17). Die Pruefungen sind woertlich
-# aus §6.1 uebernommen.
+# aus §6.1 uebernommen; L18-L20 sind der Nachtrag aus MARAAA-208 (Review F1/F4).
 #
 # Rein statisch: grep/awk/git, keine Swift-Toolchain, kein Netz, kein Aufruf
 # anderer Tests.
@@ -105,6 +105,14 @@ section_lacks() {
     else
         pass "$label"
     fi
+}
+
+# Trefferzahl innerhalb eines Abschnitts. Fuer Zaehlungen, die nur im Rumpf
+# einer Funktion gelten sollen (z. B. der lokale Cursor, F1).
+section_count() {
+    local file="$1" start="$2" end="$3" pattern="$4" n
+    n="$(section "$file" "$start" "$end" | grep -cE "$pattern" 2>/dev/null || true)"
+    echo "${n:-0}" | tr -d ' '
 }
 
 # Klammerblock ab der ersten Zeile eines Abschnitts, die $4 enthaelt, bis zur
@@ -255,13 +263,67 @@ else
     fi
 fi
 
-# L16: die Karte behaelt ihre Form — sieben Parameter, keine neue Signatur.
-card_params="$(section "$card" 'struct ToolCallCard: View {' 'var body:' \
-    | count_matches '/dev/stdin' '^    let [A-Za-z]+: ')"
-if [[ "$card_params" -eq 7 ]]; then
-    pass "L16 ToolCallCard-Signatur unveraendert (7 Parameter)"
+# L16: die Karte behaelt ihre Form — sieben Parameter, woertlich verglichen.
+# F4/MARAAA-208: die blosse Anzahl genuegt nicht; eine Typaenderung
+# (`argumentsText: String?` -> `String`) muss rot werden.
+card_sig="$(section "$card" 'struct ToolCallCard: View {' 'var body:' \
+    | grep -E '^    let [A-Za-z]+: ' || true)"
+expected_card_sig='    let name: String
+    let emoji: String?
+    let status: ToolCallStatus
+    let argumentsText: String?
+    let resultText: String?
+    let isExpanded: Bool
+    let onToggle: () -> Void'
+if [[ "$card_sig" == "$expected_card_sig" ]]; then
+    pass "L16 ToolCallCard-Signatur woertlich unveraendert (7 Parameter)"
 else
-    bad "L16 ToolCallCard-Signatur geaendert ($card_params Parameter, erwartet: 7)"
+    bad "L16 ToolCallCard-Signatur geaendert (erwartet: 7 Parameter woertlich)"
+fi
+
+# ---------------------------------------------------------------------------
+# L18-L20: Abgleich nur waehrend eines Werkzeuglaufs + lokaler Cursor
+# (Nachtrag MARAAA-208, Review F1).
+# ---------------------------------------------------------------------------
+
+sync_start='private func liveActivitySync('
+sync_end='private func applyHistoryDelta('
+running_start='private var hasRunningToolCard'
+
+# L18: der Laufzustand wird vor jeder Anfrage abgefragt, und nur eine Karte
+# dieses Turns mit Status .running haelt den Abgleich wach.
+section_has "$vm" "$sync_start" "$sync_end" 'let running = hasRunningToolCard' \
+    'L18a Abgleich fragt den Laufzustand ab'
+section_has "$vm" "$running_start" "$sync_start" 'turnEntryIDs\.contains' \
+    'L18b nur Karten des laufenden Turns zaehlen'
+section_has "$vm" "$running_start" "$sync_start" 'toolStatus == \.running' \
+    'L18c nur laufende Karten halten den Abgleich wach'
+
+# L19: ein lokaler Cursor begrenzt die Uebernahme; er wird einmal aus dem
+# Wasserstand gesetzt, wandert vorwaerts und laesst den Merge-Wasserstand in Ruhe.
+cursor_init="$(section_count "$vm" "$sync_start" "$sync_end" 'cursor = watermark \?\? -1')"
+if [[ "$cursor_init" -eq 1 ]]; then
+    pass "L19a Cursor wird genau einmal aus dem Wasserstand gesetzt"
+else
+    bad "L19a Cursor wird je Runde zurueckgesetzt (Treffer: $cursor_init, erwartet: 1)"
+fi
+section_has "$vm" "$sync_start" "$sync_end" '\$0\.id > cursor' \
+    'L19b Cursor begrenzt die neuen Zeilen'
+section_has "$vm" "$sync_start" "$sync_end" 'cursor = max\(cursor,' \
+    'L19c Cursor wandert vorwaerts'
+section_lacks "$vm" "$sync_start" "$sync_end" '(^|[^A-Za-z])watermark =' \
+    'L19d Wasserstand des Abschluss-Merges bleibt unberuehrt'
+
+# L20: nach dem letzten Werkzeug genau eine Abschlussrunde, dann Pause.
+section_has "$vm" "$sync_start" "$sync_end" 'else if finalRoundPending \{' \
+    'L20a Abschlussrunde nach dem letzten Werkzeug ist vorhanden'
+section_has "$vm" "$sync_start" "$sync_end" 'var finalRoundPending = true' \
+    'L20b Abschlussrunde ist ab dem Start offen'
+final_consume="$(section_count "$vm" "$sync_start" "$sync_end" 'finalRoundPending = false')"
+if [[ "$final_consume" -eq 1 ]]; then
+    pass "L20c Abschlussrunde wird genau einmal verbraucht"
+else
+    bad "L20c Abschlussrunde wird nicht genau einmal verbraucht (Treffer: $final_consume, erwartet: 1)"
 fi
 
 # ---------------------------------------------------------------------------
