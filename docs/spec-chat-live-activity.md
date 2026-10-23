@@ -13,13 +13,14 @@ beiden; es beantwortet die Anzeigefrage, die beide offen lassen.
 
 ## 0. Kurzfassung
 
-**Flächen-Annahme (am Gate korrigierbar):** Gegenstand ist der **Chat-Tab der
+**Flächen-Annahme (am 2026-10-23 bestätigt):** Gegenstand ist der **Chat-Tab der
 Planer-App** (`Planer/Features/Chat`), also die Unterhaltung, die der Nutzer mit
 Hermes führt. Das **Paperclip-Board ist nicht Gegenstand** — es ist ein
-Fremdprodukt, seine Oberfläche wird hier nicht entworfen. Sollte der Auftrag
-tatsächlich die Board-Ansicht meinen, ist dieses Dokument an der Stelle falsch
-und muss am Gate zurückgewiesen werden; alle Befunde unten gelten ausschließlich
-für den Chat-Tab.
+Fremdprodukt, seine Oberfläche wird hier nicht entworfen. Die Annahme ist vom
+Auftraggeber bestätigt worden (Gate-Karte zu diesem Dokument, angenommen am
+2026-10-23); alle Befunde unten gelten ausschließlich für den Chat-Tab. Sollte
+später doch eine andere Fläche gemeint sein, ist dieses Dokument an der Stelle
+falsch und muss zurückgewiesen werden, statt punktuell ergänzt zu werden.
 
 1. **Der Nutzer sieht heute schon etwas — aber nicht das, wonach er fragt.**
    Live vorhanden sind: Text-Deltas, Denk-Spur, Werkzeugkarten und die
@@ -596,12 +597,14 @@ Turn-Ende; der Verlauf folgt dem wachsenden Text, ohne dass der Nutzer scrollt.
 
 ## 7. Offene Punkte
 
-Keiner dieser Punkte blockiert die Umsetzung. Jeder hat eine **Vorentscheidung**;
-der Auftraggeber kann sie am Gate kippen.
+Keiner dieser Punkte blockiert die Umsetzung. **O1 ist entschieden** (Gate
+angenommen am 2026-10-23, siehe §0). Die übrigen haben eine **Vorentscheidung**;
+der Auftraggeber kann sie jederzeit kippen, ohne dass das Dokument neu
+geschrieben werden muss.
 
 | # | Punkt | Vorentscheidung (gilt, wenn niemand widerspricht) | Kosten der Kehrtwende |
 |---|---|---|---|
-| O1 | **Fläche**: Chat-Tab der Planer-App, nicht das Paperclip-Board | Chat-Tab, wie in §0 benannt | hoch — das ganze Dokument wäre am falschen Gegenstand; Board-Anzeige bräuchte einen eigenen Vorgang |
+| O1 | **Fläche**: Chat-Tab der Planer-App, nicht das Paperclip-Board | **entschieden und bestätigt** (§0) | hoch — das ganze Dokument wäre am falschen Gegenstand; Board-Anzeige bräuchte einen eigenen Vorgang |
 | O2 | **Intervall 3 s** statt 2 s oder 5 s | 3 s (§5.2) | klein — ein Wert in `ChatConfiguration`; 2 s verdoppelt die Last, 5 s lässt Karten träger wirken als der Keepalive |
 | O3 | **Abgleich erst ab dem ersten Werkzeug-Frame** statt ab Turn-Start | ab erstem Frame (§5.2) | klein — eine Bedingung; früher zu starten kostet 30–90 Anfragen pro Turn ohne Anzeigegewinn |
 | O4 | **`.waitingForModel` als eigener Phasenfall** statt Umbenennung von `.thinking` | eigener Fall (§5.1/4) | klein — ein Enum-Fall, ein Titel, eine Ableitungszeile; die Umbenennung wäre billiger, würde aber während des Denkens das falsche Wort zeigen |
