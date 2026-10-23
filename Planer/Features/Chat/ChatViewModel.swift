@@ -426,11 +426,24 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Verlauf
 
+    /// Ergebnis eines Ladens der ersten Sitzungsseite — als **Wert**, damit
+    /// ein Aufrufer es erst nach seinem eigenen Riegel anwenden kann
+    /// (R-CH13). `loadSessions()` wendet es sofort an.
+    private enum SessionsPageLoad {
+        case loaded(sessions: [SessionSummary], sessionOffset: Int, loadedAllSessions: Bool)
+        case failed(notice: String)
+    }
+
     /// Lädt die erste Seite der Sitzungsliste. Der Server liefert alle Quellen;
     /// die App blendet ausschließlich interne Quellen aus (MARAAA-155).
-    func loadSessions() async {
+    ///
+    /// Grenze (R-CH13): schreibt nur den Lade-Riegel, nie `sessions`,
+    /// `sessionOffset`, `loadedAllSessions` oder `notice`. Diese Werte gehören
+    /// dem Aufrufer, der entscheidet, ob seine Generation noch gilt.
+    /// `nil` = es lief bereits ein Laden.
+    private func fetchFirstSessionsPage() async -> SessionsPageLoad? {
         refreshConfiguration()
-        guard !isLoadingSessions else { return }
+        guard !isLoadingSessions else { return nil }
         isLoadingSessions = true
         defer { isLoadingSessions = false }
 
@@ -439,19 +452,41 @@ final class ChatViewModel: ObservableObject {
                 limit: configuration.sessionPageSize,
                 offset: 0
             )
-            sessions = page.sessions.filter { configuration.showsSessionSource($0.source) }
-            sessionOffset = page.sessions.count
-            loadedAllSessions = page.sessions.isEmpty
-            syncCurrentSessionWithList()
+            return .loaded(
+                sessions: page.sessions.filter { configuration.showsSessionSource($0.source) },
+                sessionOffset: page.sessions.count,
+                loadedAllSessions: page.sessions.isEmpty
+            )
         } catch {
+            return .failed(
+                notice: isUnreachable(error)
+                    ? "Offline — der Verlauf ist nicht erreichbar."
+                    : displayText(for: error)
+            )
+        }
+    }
+
+    /// Wendet eine geladene erste Seite an. Der Aufrufer prüft vorher seine
+    /// Generation (R-CH13).
+    private func apply(_ load: SessionsPageLoad) {
+        switch load {
+        case .loaded(let freshSessions, let offset, let isComplete):
+            sessions = freshSessions
+            sessionOffset = offset
+            loadedAllSessions = isComplete
+            syncCurrentSessionWithList()
+        case .failed(let notice):
             // Kein Cache: eine nicht erreichbare Liste wird nicht als leerer
             // Verlauf ausgegeben.
             sessions = []
             loadedAllSessions = false
-            notice = isUnreachable(error)
-                ? "Offline — der Verlauf ist nicht erreichbar."
-                : displayText(for: error)
+            self.notice = notice
         }
+    }
+
+    func loadSessions() async {
+        guard let load = await fetchFirstSessionsPage() else { return }
+        apply(load)
     }
 
     /// Nächste Seite. Abgebrochen wird erst bei einer **leeren** Seite, nicht
@@ -1623,15 +1658,17 @@ final class ChatViewModel: ObservableObject {
 
             let agentEntries = entries[rebuiltStart...].filter { $0.kind == .agent }.count
 
-            await loadSessions()
-            // R-CH12: `loadSessions()` gibt den Main-Actor ab und kann im
-            // Fehlerfall selbst eine `notice` setzen. Nach der Rückkehr gilt
-            // derselbe Riegel wie am Eintritt: ein fremder Turn erbt weder
-            // die Liste noch das Merge-Ergebnis.
+            // R-CH13: Liste und Meldung sind Werte. `fetchFirstSessionsPage()`
+            // gibt den Main-Actor ab; angewendet wird erst unter dem Riegel.
+            // Sonst schriebe ein verspäteter Lauf `notice` und `sessions` in
+            // einen inzwischen gestarteten Turn (Befund 1 aus MARAAA-200).
+            let sessionList = await fetchFirstSessionsPage()
             guard generation == turnGeneration, abandonedGeneration != generation else {
                 return .skipped
             }
-            syncCurrentSessionWithList()
+            if let sessionList {
+                apply(sessionList)
+            }
             return .merged(agentEntries: agentEntries)
         } catch {
             // R-CH12: auch der Fehlerpfad gehört zum Turn, der ihn begonnen

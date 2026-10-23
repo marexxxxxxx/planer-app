@@ -94,6 +94,21 @@
 # zu MARAAA-198: Guard nach `loadSessions()` entfernt ⇒ B50a, Guard im `catch`
 # entfernt ⇒ B50b/B50c, Guard in `streamTurn` entfernt ⇒ B50e.
 #
+# Nachtrag R-CH13 (MARAAA-201, Befund 1 aus G-CH14/MARAAA-200): B50a pinnt
+# nicht mehr den Guard hinter `loadSessions()`, sondern den Werte-Fluss —
+# erst `fetchFirstSessionsPage()` (ohne Zustandsschreiben), dann der
+# Generation-Riegel, dann `apply`. B50f belegt, dass der Helfer selbst weder
+# `sessions`/`sessionOffset`/`loadedAllSessions` noch `notice` schreibt; B50g,
+# dass `loadSessions()` den Wert weiterhin anwendet. Rot-Beleg: Direktzuweisung
+# im Helfer ⇒ B50f, `apply` vor dem Guard ⇒ B50a, Rückkehr zu
+# `await loadSessions()` im Merge ⇒ B50a.
+# Im Prüfstand selbst verwirft `section_sequence` seit R-CH13 leere Marken aus
+# einem abschließenden `::` (`index($0, "")` ist immer wahr). Bleibt keine Marke
+# übrig, ist die Prüfung rot statt still grün. Der behauptete Effekt, ein
+# abschließendes `::` entwaffne die letzte Marke, ließ sich nicht reproduzieren:
+# das leere Element steht am Ende und kann keine echte Marke ersetzen. Der
+# Filter schließt nur die verbleibende Lücke „Prüfung ganz ohne Marke“.
+#
 # Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
 # Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
 # (`approvalTimeout`) und Zeile 68 (`maxNoticeCharacters`, unverändert aus
@@ -226,9 +241,19 @@ section_sequence() {
     local file="$1" start="$2" end="$3" label="$4" marks="$5" body
     body="$(section "$file" "$start" "$end")"
     if awk -v marks="$marks" '
-        BEGIN { n = split(marks, m, "::"); want = 1 }
-        want <= n && index($0, m[want]) > 0 { want++ }
-        END { exit !(want > n) }' <<<"$body"; then
+        BEGIN {
+            n = split(marks, m, "::")
+            # R-CH13: ein abschliessendes `::` erzeugt ein leeres Element;
+            # `index($0, "")` ist immer wahr. Leere Elemente werden verworfen.
+            # Bleibt keine Marke uebrig, ist die Pruefung rot statt still
+            # gruen — eine Pruefung ohne Marke darf nichts belegen.
+            k = 0
+            for (i = 1; i <= n; i++) if (m[i] != "") m[++k] = m[i]
+            n = k
+            want = 1
+        }
+        n > 0 && want <= n && index($0, m[want]) > 0 { want++ }
+        END { exit !(n > 0 && want > n) }' <<<"$body"; then
         pass "$label"
     else
         bad "$label  [$file, Abschnitt /$start/../$end/: Reihenfolge »$marks« nicht gefunden]"
@@ -907,8 +932,8 @@ background_section() {
     # `notice` setzen kann), der Fehlerpfad im `catch` — beide ohne erneute
     # Prüfung. Geprüft wird die Reihenfolge der Marken im Rumpf von `merge`.
     section_sequence "$vm" 'private func merge(sessionID: String)' 'private func applyMergedUser' \
-        "B50a nach dem Nachladen riegelt der Erfolgspfad vor dem Übernehmen (R-CH12)" \
-        'await loadSessions()::guard generation == turnGeneration, abandonedGeneration != generation else::syncCurrentSessionWithList()'
+        "B50a nach dem Nachladen riegelt der Erfolgspfad vor dem Übernehmen (R-CH12/R-CH13)" \
+        'let sessionList = await fetchFirstSessionsPage()::guard generation == turnGeneration, abandonedGeneration != generation else::apply(sessionList)'
     section_sequence "$vm" 'private func merge(sessionID: String)' 'private func applyMergedUser' \
         "B50b der Fehlerpfad prüft die Generation vor .failed (R-CH12)" \
         '} catch {::guard generation == turnGeneration, abandonedGeneration != generation else::return .failed'
@@ -917,6 +942,16 @@ background_section() {
         '} catch {::return .skipped::return .failed'
     block_lacks "$vm" 'private func merge(sessionID: String)' 'notice =' \
         "B50d merge schreibt selbst keine Meldung — der Aufrufer entscheidet (R-CH12)"
+    # R-CH13 (MARAAA-201, Befund 1 aus MARAAA-200): der Ladehelfer selbst
+    # schreibt weder die Sitzungsliste noch eine Meldung. Erst `apply` tut das,
+    # und `merge` ruft es nur hinter seinem Riegel. Mutation „Direktzuweisung
+    # zurück in den Helfer“ ist rot.
+    block_lacks "$vm" 'private func fetchFirstSessionsPage()' \
+        '(^|[^a-zA-Z])sessions =|sessionOffset =|loadedAllSessions =|notice =' \
+        "B50f der Ladehelfer schreibt weder Liste noch Meldung (R-CH13)"
+    block_has "$vm" 'func loadSessions() async' \
+        'apply\(load\)' \
+        "B50g loadSessions wendet die geladene Seite weiterhin an (R-CH13)"
     # Der Aufrufer schrieb die `.failed`-Meldung nach dem `await` ohne Prüfung.
     # Geprüft wird der Riegel **nach** dem Merge-Aufruf und **vor** dem Zweig,
     # der die Meldung setzt. Mutation „guard löschen“ ist rot (B50e).
