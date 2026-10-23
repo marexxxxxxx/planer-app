@@ -24,6 +24,11 @@
 # (Handler, Karte, Verzweigung), nicht die Datei — die Mutationsmatrix dazu
 # steht im Bericht zu MARAAA-176.
 #
+# Nachtrag Rev 9 (MARAAA-188): B31–B42 prüfen den Wiederanlauf nach der
+# Rückkehr aus dem Hintergrund (Schonfrist, abgebrochener toter Strom,
+# sichtbarer Wiederholweg über `offersHistoryReload`). Sie ändern keine der
+# Prüfungen B1–B30.
+#
 # Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
 # Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
 # (`approvalTimeout`) und Zeile 68 (`maxNoticeCharacters`, unverändert aus
@@ -595,6 +600,51 @@ background_section() {
         "B29 der Handler betritt den Main-Actor synchron, ohne Hop (F1)"
     block_lacks "$vm" "$handler" 'Task(\.[A-Za-z]+)?[[:space:]]*\{' \
         "B30 kein Task-Hop im Handler — UIKit verlangt die Freigabe vor der Rückkehr (F1)"
+
+    # --- A1/A2 (Rev 9, MARAAA-188): die Rückkehr endet nicht im toten Strom --
+    # Ein Strom, den die Suspension getötet hat, liefert nie einen Fehler: sein
+    # `URLSession`-Request lebt bis `streamIdleTimeout` (Default 900 s) weiter.
+    # Ohne Schonfrist bliebe `isStreaming` true und der Composer gesperrt —
+    # genau der Nutzerbericht „ich muss die App neu starten“.
+    need_fixed "$cfg" 'var backgroundResumeGracePeriod: TimeInterval = 5' \
+        "B31 die Schonfrist ist ein benannter Wert (5 s)"
+    need_fixed "$vm" 'private var resumeWatchdogTask: Task<Void, Never>?' \
+        "B32 der Watchdog ist gespeichert (kein freier Task)"
+    section_has "$vm" 'func handleWillEnterForeground' 'func reconcileAfterBackground' \
+        'scheduleResumeWatchdog\(\)' \
+        "B33 die Rückkehr stellt bei laufendem Strom den Watchdog"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
+        'await runningTask\.value' \
+        "B34 der tote Strom wird abgebrochen und abgewartet"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
+        'streamEventCount == seenEvents' \
+        "B35 ein Strom mit Ereignissen seit der Rückkehr gewinnt (E15/B14)"
+    section_order "$vm" 'private func run(text: String) async' 'private func rescueEmptyTurn' \
+        'defer {' 'cancelResumeWatchdog\(\)' \
+        "B36 das Turn-Ende bricht den Watchdog ab"
+    block_has "$vm" 'deinit {' 'resumeWatchdogTask\?\.cancel\(\)' \
+        "B37 der Deinit bricht den Watchdog ab"
+    section_has "$vm" 'func handleDidEnterBackground' 'func handleWillEnterForeground' \
+        'cancelResumeWatchdog\(\)' \
+        "B38 der Wechsel in den Hintergrund bricht den Watchdog ab"
+    section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
+        'if !historyLoaded \{ offerHistoryReload\(\) \}' \
+        "B39 gescheitertes Nachladen bietet den Wiederholweg (A2)"
+    section_lacks "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
+        'offersHistoryReload = false' \
+        "B40 die Rückkehr nimmt den Wiederholweg nicht wieder zurück (A2)"
+    # B41 hält die Semantik aus B14 fest: der Watchdog greift nur, wenn seit der
+    # Rückkehr kein einziges Ereignis ankam — ein lebender Strom wird nicht
+    # abgebrochen, nur weil die Frist abläuft.
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
+        'guard isStreaming else \{ return \}' \
+        "B41 ohne laufenden Turn tut der Watchdog nichts"
+    # B42: eine wartende Freigabe ist legitime Stille (bis `approvalTimeout`).
+    # Sie darf nicht als toter Strom gelten — sonst verschwänden die Chips und
+    # der Befehl ließe sich nicht mehr freigeben. Die Frist wird neu gestellt.
+    section_order "$vm" 'private func abandonDeadStreamIfNeeded(' 'private func beginBackgroundTaskIfNeeded' \
+        'turnPhase == \.awaitingApproval' 'scheduleResumeWatchdog\(\)' \
+        "B42 eine wartende Freigabe stellt die Frist neu, statt abzubrechen"
 }
 
 # ---------------------------------------------------------------------------

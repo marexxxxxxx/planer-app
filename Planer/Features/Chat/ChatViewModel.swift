@@ -144,7 +144,21 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isLoadingSessions = false
     @Published private(set) var isLoadingHistory = false
     @Published private(set) var isStreaming = false
-    @Published private(set) var notice: String?
+    /// Die sichtbare Meldung über dem Verlauf.
+    ///
+    /// Rev 9 (MARAAA-188): jede Zuweisung fällt über `didSet` auf die
+    /// Fehler-Optik zurück. Nur der Hintergrund-Hinweis setzt danach
+    /// `noticeIsInformational` — ein späterer Fehler kann dessen Optik also
+    /// nicht erben.
+    @Published private(set) var notice: String? {
+        didSet { noticeIsInformational = false }
+    }
+    /// `true` = `notice` ist ein Hinweis und kein Fehler.
+    ///
+    /// Zweck: Der Text „Der Chat war im Hintergrund …“ ist eine Auskunft; er
+    /// darf nicht wie ein Abbruch aussehen. Grenze: eigene, explizite
+    /// Unterscheidung — **kein** Vergleich auf den Meldungstext.
+    @Published private(set) var noticeIsInformational = false
     @Published private(set) var statusNote: ChatStatusNote?
     @Published var draft = ""
     @Published private(set) var hasMoreOlder = false
@@ -176,6 +190,15 @@ final class ChatViewModel: ObservableObject {
     private var configuration: HermesChatConfiguration
 
     private var streamTask: Task<Void, Never>?
+    /// A1 (Rev 9, MARAAA-188): Schonfrist-Task nach der Rückkehr aus dem
+    /// Hintergrund; `nil` = kein laufender Watchdog.
+    ///
+    /// Grenze: genau **ein** Task. Er wird bei Turn-Ende, beim Wechsel in den
+    /// Hintergrund, beim Senden und im `deinit` abgebrochen.
+    private var resumeWatchdogTask: Task<Void, Never>?
+    /// Zahl der im laufenden Turn empfangenen Ereignisse — das Lebenszeichen,
+    /// an dem der Watchdog „lebt noch“ von „ist tot“ unterscheidet.
+    private var streamEventCount = 0
     /// Höchste bereits dargestellte Nachrichten-ID; `0` ist die Baseline einer
     /// geladenen, aber leeren Session (E5) — nie eine echte Server-ID.
     private var watermark: Int?
@@ -234,6 +257,8 @@ final class ChatViewModel: ObservableObject {
     }
 
     deinit {
+        // A1: kein Task überlebt das Modell (Rev 9, MARAAA-188).
+        resumeWatchdogTask?.cancel()
         for observer in lifecycleObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -542,6 +567,9 @@ final class ChatViewModel: ObservableObject {
         turnEntryIDs = []
         streamStarted = false
         streamRequested = false
+        // A1: ein neuer Turn beginnt ohne Lebenszeichen und ohne alte Frist.
+        cancelResumeWatchdog()
+        streamEventCount = 0
         mergeFallbackDuration = nil
         createdSessionThisTurn = false
         receivedSessionHeader = false
@@ -627,6 +655,9 @@ final class ChatViewModel: ObservableObject {
     /// Ohne laufenden Turn passiert nichts — kein Hintergrund-Task, kein
     /// Merker. Sonst merkt sich das Modell den Turn und bittet iOS um Zeit.
     func handleDidEnterBackground() {
+        // A1: im Hintergrund entscheidet kein Watchdog; die Rückkehr stellt
+        // ihn neu (Rev 9, MARAAA-188).
+        cancelResumeWatchdog()
         guard isStreaming else { return }
         resumeAfterBackground = true
         beginBackgroundTaskIfNeeded()
@@ -638,7 +669,14 @@ final class ChatViewModel: ObservableObject {
         endBackgroundTaskIfNeeded()
         guard resumeAfterBackground else { return }
         resumeAfterBackground = false
-        guard !isStreaming else { return }
+        guard !isStreaming else {
+            // A1 (Rev 9, MARAAA-188): Ein Strom, der die Suspension überlebt
+            // hat, gewinnt weiterhin (E15/B14) — aber nur, solange er lebt.
+            // Der Watchdog bricht ihn nach der Schonfrist ab, wenn seit der
+            // Rückkehr kein einziges Ereignis mehr ankam.
+            scheduleResumeWatchdog()
+            return
+        }
         Task { await reconcileAfterBackground() }
     }
 
@@ -652,11 +690,82 @@ final class ChatViewModel: ObservableObject {
         guard !isStreaming else { return }
         guard let session = currentSession else { return }
         await openSession(session)
+        // A2 (Rev 9, MARAAA-188): Ein gescheitertes Nachladen darf den
+        // Composer nicht ohne Weg sperren (`canSend` verlangt `historyLoaded`).
+        // Der vorhandene Knopf „Verlauf neu laden“ bleibt deshalb sichtbar.
+        if !historyLoaded { offerHistoryReload() }
         if notice == nil {
             notice = Self.backgroundResumeNotice
+            // Der Hinweis ist eine Auskunft, kein Fehler (A5).
+            noticeIsInformational = true
         }
         resumeAfterBackground = false
-        offersHistoryReload = false
+    }
+
+    // MARK: Rückkehr aus dem Hintergrund (Rev 9)
+
+    /// A1: Schonfrist nach der Rückkehr, solange der Strom noch als laufend
+    /// gilt.
+    ///
+    /// Zweck: Eine im Hintergrund abgerissene Anfrage liefert nie einen
+    /// Fehler; ihr Request lebt bis `streamIdleTimeout` (Default 900 s)
+    /// weiter. Ohne Frist bliebe `isStreaming` true und der Composer gesperrt.
+    /// Grenze: greift nur, wenn seit der Rückkehr **kein** Ereignis ankam; ein
+    /// lebender Strom bleibt unangetastet (E15/B14). Solange eine Freigabe
+    /// wartet, wird die Frist neu gestellt statt abgebrochen. Genau ein Task je
+    /// Rückkehr, gespeichert in `resumeWatchdogTask`.
+    private func scheduleResumeWatchdog() {
+        cancelResumeWatchdog()
+        let gracePeriod = max(configuration.backgroundResumeGracePeriod, 0)
+        let seenEvents = streamEventCount
+        resumeWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(gracePeriod * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            await self.abandonDeadStreamIfNeeded(seenEvents: seenEvents)
+        }
+    }
+
+    /// Bricht den Watchdog ab; idempotent. Grenze: der Antwortstrom bleibt
+    /// unberührt — abgebrochen wird nur die Frist.
+    private func cancelResumeWatchdog() {
+        resumeWatchdogTask?.cancel()
+        resumeWatchdogTask = nil
+    }
+
+    /// A1: Der Strom hat die Schonfrist ohne ein einziges Ereignis überstanden
+    /// — er gilt als tot. Er wird abgebrochen, danach wird der serverseitig
+    /// gespeicherte Turn über den vorhandenen Pfad geladen
+    /// (`reconcileAfterBackground` → `openSession`).
+    ///
+    /// Grenze: kein zweiter Strom und keine zweite Merge-Logik. Der Abbruch
+    /// ist ein technischer, kein Nutzerabbruch; er hinterlässt keine Meldung.
+    /// Der Byte-Strom kennt den Abbruch, das Warten ist deshalb kurz.
+    private func abandonDeadStreamIfNeeded(seenEvents: Int) async {
+        // Vor dem Abbruch freigeben: das Turn-Ende ruft `cancelResumeWatchdog()`
+        // und darf diesen Task nicht selbst kündigen — er lädt gleich nach.
+        resumeWatchdogTask = nil
+        guard isStreaming else { return }
+        // Ein Strom, der seit der Rückkehr ein Ereignis geliefert hat, lebt.
+        guard streamEventCount == seenEvents else { return }
+        // Eine wartende Freigabe ist legitime Stille (bis `approvalTimeout`)
+        // und kein toter Strom: die Frist beginnt neu, statt den Turn
+        // abzubrechen — sonst verlöre der Nutzer die Freigabe-Chips.
+        if turnPhase == .awaitingApproval {
+            scheduleResumeWatchdog()
+            return
+        }
+
+        let runningTask = streamTask
+        runningTask?.cancel()
+        if let runningTask {
+            await runningTask.value
+        }
+        streamTask = nil
+        // Ein technischer Abbruch sieht nicht wie ein Nutzerabbruch aus.
+        notice = nil
+        statusNote = nil
+        await reconcileAfterBackground()
     }
 
     /// Genau-einmal-Riegel für die Hintergrund-Aufgabe (§3.5.3).
@@ -797,6 +906,8 @@ final class ChatViewModel: ObservableObject {
             // R-CH5: beide Turn-Felder ueberleben den Turn nicht mehr.
             streamRequested = false
             mergeFallbackDuration = nil
+            // A1 (Rev 9): kein Watchdog überlebt seinen Turn.
+            cancelResumeWatchdog()
         }
         do {
             // O7: erst prüfen, ob der Server das Profil ausliefert — ein 404
@@ -931,6 +1042,9 @@ final class ChatViewModel: ObservableObject {
         // Nachladen des Verlaufs erwogen werden (Rev 8 §3.2.1).
         streamRequested = true
         for try await event in provider.stream(sessionID: sessionID, userText: text) {
+            // A1 (Rev 9, MARAAA-188): jedes Ereignis ist ein Lebenszeichen —
+            // der Watchdog nach der Rückkehr zählt darauf.
+            streamEventCount += 1
             // H2: erst ein tatsächlich empfangenes Ereignis beweist, dass der
             // Strom läuft. Ein Fehler davor rollt den Entwurf zurück (§4.8).
             streamStarted = true

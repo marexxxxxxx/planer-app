@@ -172,12 +172,26 @@ struct ChatView: View {
         }
     }
 
+    /// Rev 9 (MARAAA-188): Symbol und Farbe der Meldungsleiste.
+    ///
+    /// Zweck: Der Hintergrund-Hinweis ist eine Auskunft, kein Fehler — er trägt
+    /// `info.circle` und die Label-Farbe. Grenze: die Unterscheidung kommt aus
+    /// dem Modell (`noticeIsInformational`), nicht aus dem Meldungstext; echte
+    /// Fehler behalten Dreieck und danger.
+    private var noticeImageName: String {
+        viewModel.noticeIsInformational ? "info.circle" : "exclamationmark.triangle.fill"
+    }
+
+    private var noticeImageColor: Color {
+        viewModel.noticeIsInformational ? DesignTokens.Palette.secondaryLabel : DesignTokens.Palette.danger
+    }
+
     private func noticeBar(_ notice: String) -> some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
             HStack(alignment: .top, spacing: DesignTokens.Spacing.s) {
-                Image(systemName: "exclamationmark.triangle.fill")
+                Image(systemName: noticeImageName)
                     .font(DesignTokens.Typography.footnote)
-                    .foregroundStyle(DesignTokens.Palette.danger)
+                    .foregroundStyle(noticeImageColor)
 
                 Text(notice)
                     .font(DesignTokens.Typography.footnote)

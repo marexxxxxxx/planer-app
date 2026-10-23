@@ -46,6 +46,17 @@ struct HermesChatConfiguration: Sendable, Equatable {
     /// Untätigkeits-Timeout des Stroms; größer als der Server-Freigabe-Timeout,
     /// damit eine legitime Freigabe nicht abgeschnitten wird.
     var streamIdleTimeout: TimeInterval = 900
+    /// Schonfrist nach der Rückkehr aus dem Hintergrund (Rev 9, MARAAA-188):
+    /// so lange darf ein Strom ohne ein einziges Ereignis weiterlaufen, bevor
+    /// er als tot gilt und der Serverstand nachgeladen wird.
+    ///
+    /// Zweck: ein von der Suspension getöteter Strom liefert **nie** einen
+    /// Fehler — sein Request lebt bis `streamIdleTimeout` (900 s) weiter. Ohne
+    /// Frist bliebe `isStreaming` true und der Composer gesperrt, bis der
+    /// Prozess neu startet. Grenze: die Frist ist keine Turn-Grenze; ein
+    /// Strom, der seit der Rückkehr ein Ereignis geliefert hat, bleibt
+    /// unangetastet (E15).
+    var backgroundResumeGracePeriod: TimeInterval = 5
     /// Server-Deckel für die Verlaufsliste ist 200.
     var sessionPageSize = 50
     /// Server-Deckel für Nachrichten ist 500.
@@ -67,6 +78,18 @@ struct HermesChatConfiguration: Sendable, Equatable {
     /// eine geänderte Einheit (z. B. Millisekunden) und wird verworfen statt
     /// angezeigt.
     var maxVisibleGenerationDuration: TimeInterval = 86_400
+
+    // MARK: Stromgrenzen
+
+    /// Obergrenze eines einzelnen SSE-Ereignisses in Zeichen (Rev 9,
+    /// MARAAA-188) — der **einzige** Wert dieser Grenze im Baum.
+    ///
+    /// Zweck: ein einzelnes riesiges Server-Ereignis (z. B. ein großes
+    /// Werkzeug-Ergebnis im Status-Ereignis) darf den Turn nicht beenden. Die
+    /// Oberfläche kappt Text ohnehin (`maxToolDetailCharacters`/
+    /// `maxTextCharacters`). Grenze: das Ereignis wird **verworfen**, nicht
+    /// gekürzt, und der Puffer wächst nie über diesen Wert.
+    var maxStreamEventCharacters = 262_144
 
     // MARK: Textgrenzen
 

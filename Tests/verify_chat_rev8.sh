@@ -610,11 +610,17 @@ global_section() {
         bad "X4 F8-Literal: Treffer $total, erwartet 1 in $prov  [$(head -1 <<<"$hits")]"
     fi
 
-    # X5: Provider, SSE und DTOs unveraendert.
-    if [[ -z "$(git diff --stat "${base_commit}..HEAD" -- "$prov" "$sse" "$dtos" 2>/dev/null || true)" ]]; then
+    # X5: Provider, SSE und DTOs im CH4-Commit unveraendert.
+    # Anker ist wie bei X1/X2 der feste CH4-Bereich: die Aussage „Rev 8 hat
+    # diese drei Dateien nicht angefasst“ gilt fuer den CH4-Commit, nicht fuer
+    # jeden spaeteren Commit auf main (MARAAA-186). Rev 9 (MARAAA-188) aendert
+    # Provider und SSE bewusst (ein zu grosses SSE-Ereignis wird verworfen
+    # statt zum Turn-Fehler); ein Vergleich gegen HEAD wuerde die alte Zusage
+    # mit der neuen Arbeit umdrehen, statt sie zu pruefen.
+    if [[ -z "$(git diff --stat "$ch4_range" -- "$prov" "$sse" "$dtos" 2>/dev/null || true)" ]]; then
         pass "X5 ChatStreamProvider/ChatSSE/ChatDTOs unveraendert"
     else
-        bad "X5 unerlaubte Aenderung an Provider/SSE/DTOs: $(git diff --name-only "${base_commit}..HEAD" -- "$prov" "$sse" "$dtos" | tr '\n' ' ')"
+        bad "X5 unerlaubte Aenderung an Provider/SSE/DTOs: $(git diff --name-only "$ch4_range" -- "$prov" "$sse" "$dtos" | tr '\n' ' ')"
     fi
 
     # X6: Design-Tokens unveraendert.

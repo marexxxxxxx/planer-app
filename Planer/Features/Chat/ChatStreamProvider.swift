@@ -269,7 +269,7 @@ struct HermesChatStreamProvider: ChatStreamProvider {
         _ bytes: URLSession.AsyncBytes,
         continuation: AsyncThrowingStream<ChatStreamEvent, Error>.Continuation
     ) async throws {
-        var decoder = ServerSentEventDecoder()
+        var decoder = ServerSentEventDecoder(maxCharacters: configuration.maxStreamEventCharacters)
         var finishReason: String?
         var errorMessage: String?
         var characters = 0
@@ -278,7 +278,9 @@ struct HermesChatStreamProvider: ChatStreamProvider {
 
         for try await line in bytes.lines {
             try Task.checkCancellation()
-            guard let event = try decoder.consume(line: line) else { continue }
+            // Ein verworfenes Ereignis (Größenlimit) liefert `nil`; der Strom
+            // liest dann weiter, statt den Turn zu beenden (Rev 9, MARAAA-188).
+            guard let event = decoder.consume(line: line) else { continue }
             let payload = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !payload.isEmpty else { continue }
 
