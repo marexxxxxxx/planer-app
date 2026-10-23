@@ -34,6 +34,17 @@ final class ChatViewModel: ObservableObject {
     /// Er behauptet weder, der Turn habe weiterlief, noch dass er abbrach.
     static let backgroundResumeNotice = "Der Chat war im Hintergrund. Der Verlauf wurde vom Server neu geladen."
 
+    /// Hinweis, wenn der Watchdog den lokalen Strom als tot verworfen hat
+    /// (Rev 9, MARAAA-188).
+    ///
+    /// Zweck: Ein stiller und ein toter Strom sind nach der Rückkehr nicht
+    /// unterscheidbar — der Ausgang muss deshalb ehrlich sein: die Verbindung
+    /// ist abgerissen (Verlust), der Turn kann auf dem Server weiterlaufen,
+    /// und „Verlauf neu laden“ ist der Weg dorthin. Grenze: kein
+    /// Erfolgs-Hinweis; der Text wird als Warnung dargestellt
+    /// (`noticeIsInformational == false`), weil er einen Verlust benennt.
+    static let backgroundStreamLostNotice = "Die Verbindung ist im Hintergrund abgerissen. Der Turn kann auf dem Server weiterlaufen — „Verlauf neu laden“ holt ihn."
+
     /// Eine Zeile im Verlauf.
     struct Entry: Identifiable, Equatable {
         enum Kind: Equatable {
@@ -182,7 +193,9 @@ final class ChatViewModel: ObservableObject {
 
     private let preferences: ChatPreferences
     private let apiFactory: (HermesChatConfiguration) -> HermesChatAPI
-    private let providerFactory: (HermesChatConfiguration) -> any ChatStreamProvider
+    /// Baut den Anbieter; der zweite Wert ist der gemeinsame Zeilenzähler des
+    /// Stroms (Rev 9, MARAAA-188). Ein Testanbieter darf ihn ignorieren.
+    private let providerFactory: (HermesChatConfiguration, ChatStreamLiveness) -> any ChatStreamProvider
     private var api: HermesChatAPI
     private var provider: any ChatStreamProvider
     /// Wird ausschließlich aus `preferences.configuration` gesetzt; ein neuer
@@ -193,12 +206,23 @@ final class ChatViewModel: ObservableObject {
     /// A1 (Rev 9, MARAAA-188): Schonfrist-Task nach der Rückkehr aus dem
     /// Hintergrund; `nil` = kein laufender Watchdog.
     ///
-    /// Grenze: genau **ein** Task. Er wird bei Turn-Ende, beim Wechsel in den
-    /// Hintergrund, beim Senden und im `deinit` abgebrochen.
+    /// Grenze: genau **ein** Task. Er läuft als Schleife (je Runde
+    /// `sleep(grace)`, danach Lebenszeichen vergleichen) und wird bei
+    /// Turn-Ende, beim Wechsel in den Hintergrund, beim Senden und im `deinit`
+    /// abgebrochen.
     private var resumeWatchdogTask: Task<Void, Never>?
-    /// Zahl der im laufenden Turn empfangenen Ereignisse — das Lebenszeichen,
-    /// an dem der Watchdog „lebt noch“ von „ist tot“ unterscheidet.
+    /// Zahl der im laufenden Turn empfangenen Ereignisse — **ein** Teil des
+    /// Lebenszeichens, an dem der Watchdog „lebt noch“ von „ist tot“
+    /// unterscheidet.
     private var streamEventCount = 0
+    /// Der zweite Teil des Lebenszeichens: jede aus dem Strom gelesene Zeile,
+    /// auch Kommentare/Keepalives und verworfene Ereignisse (Rev 9). Die
+    /// Referenz gehört dem Anbieter, gelesen wird sie hier.
+    private let liveness = ChatStreamLiveness()
+    /// E3 (Rev 9, MARAAA-188): `true`, sobald der Watchdog den Turn hart
+    /// geschlossen hat. `run` darf danach weder melden noch mergen — sonst
+    /// überschriebe der Abbruch-Fehler die ehrliche Meldung.
+    private var didAbandonTurn = false
     /// Höchste bereits dargestellte Nachrichten-ID; `0` ist die Baseline einer
     /// geladenen, aber leeren Session (E5) — nie eine echte Server-ID.
     private var watermark: Int?
@@ -243,8 +267,8 @@ final class ChatViewModel: ObservableObject {
         apiFactory: @escaping (HermesChatConfiguration) -> HermesChatAPI = {
             HermesChatAPI(configuration: $0)
         },
-        providerFactory: @escaping (HermesChatConfiguration) -> any ChatStreamProvider = {
-            HermesChatStreamProvider(configuration: $0)
+        providerFactory: @escaping (HermesChatConfiguration, ChatStreamLiveness) -> any ChatStreamProvider = {
+            HermesChatStreamProvider(configuration: $0, liveness: $1)
         }
     ) {
         self.preferences = preferences
@@ -252,7 +276,7 @@ final class ChatViewModel: ObservableObject {
         self.providerFactory = providerFactory
         self.configuration = preferences.configuration
         self.api = apiFactory(self.configuration)
-        self.provider = providerFactory(self.configuration)
+        self.provider = providerFactory(self.configuration, self.liveness)
         registerLifecycleObservers()
     }
 
@@ -280,7 +304,7 @@ final class ChatViewModel: ObservableObject {
         guard wanted != configuration else { return }
         configuration = wanted
         api = apiFactory(wanted)
-        provider = providerFactory(wanted)
+        provider = providerFactory(wanted, liveness)
     }
 
     // MARK: Abgeleiteter Zustand
@@ -368,6 +392,9 @@ final class ChatViewModel: ObservableObject {
         } else {
             await loadSessions()
         }
+        // E6 (Rev 9, MARAAA-188): scheitert auch das erneute Laden, bleibt der
+        // Wiederholweg sichtbar — sonst bliebe der Composer ohne Weg gesperrt.
+        if !historyLoaded, currentSession != nil { offerHistoryReload() }
     }
 
     // MARK: Verlauf
@@ -570,6 +597,10 @@ final class ChatViewModel: ObservableObject {
         // A1: ein neuer Turn beginnt ohne Lebenszeichen und ohne alte Frist.
         cancelResumeWatchdog()
         streamEventCount = 0
+        // Rev 9: auch der Zeilenzähler und der Abbruch-Riegel gehören zu genau
+        // diesem Turn.
+        liveness.reset()
+        didAbandonTurn = false
         mergeFallbackDuration = nil
         createdSessionThisTurn = false
         receivedSessionHeader = false
@@ -685,8 +716,10 @@ final class ChatViewModel: ObservableObject {
     ///
     /// Grenze: keine zweite Merge-Logik und keine eigene Fehlerbehandlung —
     /// `openSession` setzt seine Meldung selbst; nur wenn keine da ist, kommt
-    /// der Hintergrund-Hinweis (§3.5.3).
-    func reconcileAfterBackground() async {
+    /// der Hintergrund-Hinweis (§3.5.3). `announcesResume == false` unterdrückt
+    /// genau diesen Erfolgs-Hinweis: nach einem verworfenen Turn behauptet
+    /// niemand, das Nachladen sei der ganze Ausgang (Rev 9, E1).
+    func reconcileAfterBackground(announcesResume: Bool = true) async {
         guard !isStreaming else { return }
         guard let session = currentSession else { return }
         await openSession(session)
@@ -694,9 +727,11 @@ final class ChatViewModel: ObservableObject {
         // Composer nicht ohne Weg sperren (`canSend` verlangt `historyLoaded`).
         // Der vorhandene Knopf „Verlauf neu laden“ bleibt deshalb sichtbar.
         if !historyLoaded { offerHistoryReload() }
-        if notice == nil {
+        if announcesResume, notice == nil {
             notice = Self.backgroundResumeNotice
-            // Der Hinweis ist eine Auskunft, kein Fehler (A5).
+            // Der Hinweis ist eine Auskunft, kein Fehler (A5). Nach einem
+            // verworfenen Turn steht hier stattdessen der ehrliche Verlust-Text
+            // (E1) — dann bleibt diese Zeile aus.
             noticeIsInformational = true
         }
         resumeAfterBackground = false
@@ -704,25 +739,67 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Rückkehr aus dem Hintergrund (Rev 9)
 
+    /// Das Lebenszeichen des laufenden Turns (Rev 9, MARAAA-188).
+    ///
+    /// Es besteht aus **beiden** Quellen: ausgelieferte Ereignisse
+    /// (`streamEventCount`) **und** gelesene Zeilen (`liveness.lineCount` —
+    /// Kommentare, Keepalives, verworfene Ereignisse). Nur die Ereignisse zu
+    /// zählen hielte einen gesunden Strom, der gerade nur Keepalives schickt,
+    /// für tot.
+    private var resumeLiveness: ResumeLiveness {
+        ResumeLiveness(events: streamEventCount, lines: liveness.lineCount)
+    }
+
+    /// Wertvergleich zweier Lebenszeichen. `Equatable` genügt: der Watchdog
+    /// fragt „hat sich seit dem letzten Blick etwas geändert?“, nicht „wie
+    /// viel kam dazu?“.
+    private struct ResumeLiveness: Equatable {
+        let events: Int
+        let lines: Int
+    }
+
     /// A1: Schonfrist nach der Rückkehr, solange der Strom noch als laufend
     /// gilt.
     ///
     /// Zweck: Eine im Hintergrund abgerissene Anfrage liefert nie einen
     /// Fehler; ihr Request lebt bis `streamIdleTimeout` (Default 900 s)
     /// weiter. Ohne Frist bliebe `isStreaming` true und der Composer gesperrt.
-    /// Grenze: greift nur, wenn seit der Rückkehr **kein** Ereignis ankam; ein
+    /// Grenze: greift nur, solange sich das Lebenszeichen nicht ändert; ein
     /// lebender Strom bleibt unangetastet (E15/B14). Solange eine Freigabe
-    /// wartet, wird die Frist neu gestellt statt abgebrochen. Genau ein Task je
-    /// Rückkehr, gespeichert in `resumeWatchdogTask`.
+    /// wartet, läuft die Frist weiter statt abzubrechen.
+    ///
+    /// Aufbau: **eine** Task mit Schleife — je Runde `sleep(grace)`, danach
+    /// Lebenszeichen vergleichen; hat es sich geändert, beginnt die nächste
+    /// Runde, sonst ist der Strom tot. Kein Task je Ereignis, genau ein
+    /// gespeicherter Task (`resumeWatchdogTask`).
     private func scheduleResumeWatchdog() {
         cancelResumeWatchdog()
-        let gracePeriod = max(configuration.backgroundResumeGracePeriod, 0)
-        let seenEvents = streamEventCount
-        resumeWatchdogTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(gracePeriod * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            guard let self else { return }
-            await self.abandonDeadStreamIfNeeded(seenEvents: seenEvents)
+        resumeWatchdogTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let marker = self.resumeLiveness
+                let gracePeriod = max(self.configuration.backgroundResumeGracePeriod, 0)
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(gracePeriod * 1_000_000_000)
+                    )
+                } catch {
+                    // Abgebrochen: der Turn ist zu Ende (run-Defer) oder der
+                    // Nutzer ist wieder im Hintergrund.
+                    return
+                }
+                guard !Task.isCancelled, self.isStreaming else { return }
+                // Eine wartende Freigabe ist legitime Stille (bis
+                // `approvalTimeout`) und kein toter Strom: die Frist beginnt
+                // neu, statt den Turn abzubrechen — sonst verlöre der Nutzer
+                // die Freigabe-Chips.
+                if self.turnPhase == .awaitingApproval { continue }
+                // Neues Lebenszeichen in dieser Runde ⇒ der Strom lebt, die
+                // nächste Frist beginnt. Sonst: seit einer vollen Frist still.
+                if self.resumeLiveness != marker { continue }
+                await self.abandonDeadStreamIfNeeded()
+                return
+            }
         }
     }
 
@@ -733,39 +810,71 @@ final class ChatViewModel: ObservableObject {
         resumeWatchdogTask = nil
     }
 
-    /// A1: Der Strom hat die Schonfrist ohne ein einziges Ereignis überstanden
-    /// — er gilt als tot. Er wird abgebrochen, danach wird der serverseitig
-    /// gespeicherte Turn über den vorhandenen Pfad geladen
+    /// A1/E1: Der Strom hat eine volle Frist ohne Lebenszeichen überstanden —
+    /// er gilt als tot. Er wird abgebrochen, der Turn-Zustand hart geschlossen
+    /// und der serverseitig gespeicherte Turn über den vorhandenen Pfad geladen
     /// (`reconcileAfterBackground` → `openSession`).
     ///
-    /// Grenze: kein zweiter Strom und keine zweite Merge-Logik. Der Abbruch
-    /// ist ein technischer, kein Nutzerabbruch; er hinterlässt keine Meldung.
-    /// Der Byte-Strom kennt den Abbruch, das Warten ist deshalb kurz.
-    private func abandonDeadStreamIfNeeded(seenEvents: Int) async {
+    /// Grenze: kein zweiter Strom und keine zweite Merge-Logik. Der Abbruch ist
+    /// ein technischer, kein Nutzerabbruch; der Ausgang ist ein **Verlust**,
+    /// kein Erfolg (E1) — deshalb der eigene Text und der Wiederholweg.
+    private func abandonDeadStreamIfNeeded() async {
         // Vor dem Abbruch freigeben: das Turn-Ende ruft `cancelResumeWatchdog()`
         // und darf diesen Task nicht selbst kündigen — er lädt gleich nach.
         resumeWatchdogTask = nil
         guard isStreaming else { return }
-        // Ein Strom, der seit der Rückkehr ein Ereignis geliefert hat, lebt.
-        guard streamEventCount == seenEvents else { return }
-        // Eine wartende Freigabe ist legitime Stille (bis `approvalTimeout`)
-        // und kein toter Strom: die Frist beginnt neu, statt den Turn
-        // abzubrechen — sonst verlöre der Nutzer die Freigabe-Chips.
-        if turnPhase == .awaitingApproval {
-            scheduleResumeWatchdog()
-            return
-        }
 
+        // E3: `run` darf ab hier weder melden noch mergen — sonst überschriebe
+        // „Antwort abgebrochen.“ die ehrliche Meldung oder ein Merge den
+        // gerade geladenen Serverstand.
+        didAbandonTurn = true
         let runningTask = streamTask
         runningTask?.cancel()
-        if let runningTask {
-            await runningTask.value
-        }
-        streamTask = nil
-        // Ein technischer Abbruch sieht nicht wie ein Nutzerabbruch aus.
-        notice = nil
+        // E3: begrenztes Warten statt eines Waits auf den Task-Wert. Der Task
+        // ist abgebrochen und darf keine Ereignisse mehr liefern; ein
+        // hängender Task darf aber den Composer nicht sperren.
+        await waitForTurnStop()
+
+        // E3: den Turn-Zustand hart schließen, **bevor** nachgeladen wird. Das
+        // ist idempotent zum `defer` in `run` (gleiche Zuweisungen, kein
+        // zweiter Effekt); `merge` und `handle` sind durch `didAbandonTurn`
+        // gesperrt.
+        isStreaming = false
+        turnStartedAt = nil
         statusNote = nil
-        await reconcileAfterBackground()
+        streamTask = nil
+        cancelResumeWatchdog()
+
+        // E1: kein Erfolgs-Hinweis nach einem verworfenen Turn.
+        await reconcileAfterBackground(announcesResume: false)
+        guard historyLoaded else {
+            // Das Nachladen ist gescheitert: `openSession` hat den genaueren
+            // Grund gesetzt, `reconcileAfterBackground` den Wiederholweg. Der
+            // ehrliche Verlust-Text ersetzt keine Ursache.
+            return
+        }
+        notice = Self.backgroundStreamLostNotice
+        offerHistoryReload()
+    }
+
+    /// E3: wartet höchstens `streamStopWaitLimit` darauf, dass `run` seinen
+    /// `defer` erreicht (`isStreaming == false`).
+    ///
+    /// Grenze: kein Warten auf den Task-Wert (`value`) — das hinge an genau
+    /// dem Task, der hängen kann. Geprüft wird in Schritten von
+    /// `streamStopPollInterval`, damit der Main-Actor zwischen den Blicken
+    /// weiterläuft.
+    private func waitForTurnStop() async {
+        let limit = max(configuration.streamStopWaitLimit, 0)
+        let step = max(configuration.streamStopPollInterval, 0.01)
+        let deadline = Date().addingTimeInterval(limit)
+        while isStreaming, Date() < deadline {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(step * 1_000_000_000))
+            } catch {
+                return
+            }
+        }
     }
 
     /// Genau-einmal-Riegel für die Hintergrund-Aufgabe (§3.5.3).
@@ -915,7 +1024,15 @@ final class ChatViewModel: ObservableObject {
             try await api.probeProfile()
             let sessionID = try await prepareSession()
             try await streamTurn(sessionID: sessionID, text: text)
+            // E3 (Rev 9, MARAAA-188): ein Abbruch zwischen letztem Ereignis und
+            // Merge darf keinen Merge mehr auslösen — der Watchdog hat den Turn
+            // womöglich schon geschlossen und den Serverstand geladen.
+            try Task.checkCancellation()
         } catch {
+            // E3: Hat der Watchdog den Turn bereits hart geschlossen, ist
+            // dieser Fehler (sein eigener Abbruch) keine Meldung mehr wert —
+            // sonst überschriebe „Antwort abgebrochen.“ den ehrlichen Text.
+            if didAbandonTurn { return }
             // R1 (Rev 8 §4.4): Ein leerer Strom nach vollständig gelesener
             // Antwort ist kein „nichts gesendet“. Vor der F8-Meldung steht
             // genau ein Nachladeversuch über den vorhandenen Verlaufsweg.

@@ -94,6 +94,11 @@ struct ServerSentEventDecoder {
         case "event":
             eventName = value
         case "id":
+            // SSE-Vertrag (Rev 9, MARAAA-188): auch ein **leerer** Wert ist
+            // eine Zuweisung. `id:` — oder `id` ohne Doppelpunkt — setzt die
+            // zuletzt gesehene ID deshalb auf "" zurück, statt die alte ID
+            // weiterzuführen. Die Zuweisung bleibt bedingungslos; eine
+            // Bedingung auf den Wert wäre der Bruch des Vertrags.
             lastIdentifier = value
         default:
             break

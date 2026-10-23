@@ -29,6 +29,30 @@
 # sichtbarer Wiederholweg über `offersHistoryReload`). Sie ändern keine der
 # Prüfungen B1–B30.
 #
+# Nachtrag Runde 2 (MARAAA-188, Review-Befunde 1–4 + 7):
+# B31/B34/B35/B42 sind auf **dieselbe Zusage** umformuliert, weil die
+# Umsetzung sich geändert hat — nicht abgeschwächt:
+#   B31  vorher „5 s“ (eine Zahl), jetzt „benannter Wert im Bereich 10–15 s“
+#        (Bereich statt Literal, weil die Entscheidung einen Bereich nennt).
+#   B34  vorher „abgebrochen und abgewartet“ via `await runningTask.value`,
+#        jetzt „abgebrochen und **begrenzt** abgewartet“ (E3) plus das Verbot
+#        des unbegrenzten Wartens — dieselbe Zusage, härter geprüft.
+#   B35  vorher `streamEventCount == seenEvents`, jetzt das Lebenszeichen aus
+#        **beiden** Zählern (`resumeLiveness`), verglichen in der Schleife.
+#   B42  vorher „die Frist wird neu gestellt“ (Aufruf von
+#        `scheduleResumeWatchdog`), jetzt „die Runde läuft weiter“ (`continue`)
+#        — die Schleife hat keinen zweiten Task mehr, den man neu stellen
+#        könnte; die Zusage („eine wartende Freigabe bricht nicht ab“) bleibt.
+#   B12  vorher die Signatur `func reconcileAfterBackground() async`, jetzt der
+#        benannte Pfad ohne Parameter-Text — E1 braucht den Schalter
+#        `announcesResume`; die Zusage („es gibt **einen** benannten Pfad“)
+#        bleibt.
+#   B15  vorher `if notice == nil`, jetzt `if announcesResume, notice == nil` —
+#        dieselbe Zusage („der Hinweis überschreibt keine Fehlermeldung“).
+# Neu sind B43–B52 (ehrlicher Ausgang, begrenztes Warten und hartes Schließen,
+# kontinuierlicher Watchdog mit Zeilenzähler, Info-Optik in `emptyState` und
+# `SessionListView`, `reloadHistory`-Wiederangebot).
+#
 # Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
 # Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
 # (`approvalTimeout`) und Zeile 68 (`maxNoticeCharacters`, unverändert aus
@@ -46,6 +70,8 @@ chat="Planer/Features/Chat"
 vm="$chat/ChatViewModel.swift"
 view="$chat/ChatView.swift"
 cfg="$chat/ChatConfiguration.swift"
+slv="$chat/SessionListView.swift"
+prov="$chat/ChatStreamProvider.swift"
 chips="$chat/ToolConfirmationChips.swift"
 card="$chat/ToolCallCard.swift"
 phase="$chat/ApprovalPhase.swift"
@@ -543,7 +569,7 @@ background_section() {
         "B10 das Ende ist idempotent (Riegel)"
     need_fixed "$vm" 'static let backgroundResumeNotice = "Der Chat war im Hintergrund. Der Verlauf wurde vom Server neu geladen."' \
         "B11 der Hinweis ist wörtlich (A7)"
-    need "$vm" 'func reconcileAfterBackground\(\) async' \
+    need "$vm" 'func reconcileAfterBackground\(' \
         "B12 die Rückkehr hat einen benannten Pfad"
     section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
         'await openSession\(session\)' \
@@ -552,7 +578,7 @@ background_section() {
         'guard !isStreaming else \{ return \}' \
         "B14 ein lebender Strom gewinnt gegen die Reconciliation (E15)"
     section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
-        'if notice == nil' \
+        'if announcesResume, notice == nil' \
         "B15 der Hintergrund-Hinweis überschreibt keine Fehlermeldung"
     section_has "$vm" 'func handleDidEnterBackground' 'func handleWillEnterForeground' \
         'beginBackgroundTaskIfNeeded\(\)' \
@@ -606,19 +632,39 @@ background_section() {
     # `URLSession`-Request lebt bis `streamIdleTimeout` (Default 900 s) weiter.
     # Ohne Schonfrist bliebe `isStreaming` true und der Composer gesperrt —
     # genau der Nutzerbericht „ich muss die App neu starten“.
-    need_fixed "$cfg" 'var backgroundResumeGracePeriod: TimeInterval = 5' \
-        "B31 die Schonfrist ist ein benannter Wert (5 s)"
+    # B31: die Entscheidung nennt einen Bereich (10–15 s), nicht eine Zahl; die
+    # Prüfung liest den Wert und hält ihn in den Grenzen.
+    local grace
+    grace="$(sed -n 's/^[[:space:]]*var backgroundResumeGracePeriod: TimeInterval = \([0-9][0-9]*\).*/\1/p' "$cfg")"
+    if [[ -n "$grace" && "$grace" -ge 10 && "$grace" -le 15 ]]; then
+        pass "B31 die Schonfrist ist ein benannter Wert im Bereich 10–15 s ($grace s)"
+    else
+        bad "B31 Schonfrist: »${grace:-nicht gefunden}«, erwartet benannter Wert 10–15 s  [$cfg]"
+    fi
     need_fixed "$vm" 'private var resumeWatchdogTask: Task<Void, Never>?' \
         "B32 der Watchdog ist gespeichert (kein freier Task)"
     section_has "$vm" 'func handleWillEnterForeground' 'func reconcileAfterBackground' \
         'scheduleResumeWatchdog\(\)' \
         "B33 die Rückkehr stellt bei laufendem Strom den Watchdog"
-    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
-        'await runningTask\.value' \
-        "B34 der tote Strom wird abgebrochen und abgewartet"
-    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
-        'streamEventCount == seenEvents' \
-        "B35 ein Strom mit Ereignissen seit der Rückkehr gewinnt (E15/B14)"
+    # B34: der tote Strom wird abgebrochen und **begrenzt** abgewartet (E3).
+    # Vorher stand hier `await runningTask.value` — das hinge an genau dem Task,
+    # der hängt; die Zusage „abwarten, dann aufräumen“ bleibt.
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'await waitForTurnStop\(\)' \
+        "B34a der tote Strom wird abgebrochen und begrenzt abgewartet (E3)"
+    ban "$vm" 'await runningTask\.value' \
+        "B34b kein unbegrenztes Warten auf den Task (E3)"
+    block_has "$vm" 'private func waitForTurnStop()' 'streamStopWaitLimit' \
+        "B34c die Wartezeit ist ein benannter Wert (E3)"
+    # B35: Lebenszeichen = ausgelieferte **und** gelesene Zeilen. Vorher zählte
+    # nur `streamEventCount`; die Zusage („Verkehr hält den Strom am Leben“)
+    # bleibt, der Begriff ist jetzt vollständig.
+    block_has "$vm" 'private var resumeLiveness: ResumeLiveness' 'streamEventCount' \
+        "B35a das Lebenszeichen liest die Ereignisse"
+    block_has "$vm" 'private var resumeLiveness: ResumeLiveness' 'lineCount' \
+        "B35b das Lebenszeichen liest die gelesenen Zeilen (Keepalive/verworfen)"
+    section_has "$vm" 'private func scheduleResumeWatchdog' 'private func cancelResumeWatchdog' \
+        'resumeLiveness != marker' \
+        "B35c ein Strom mit neuem Lebenszeichen gewinnt gegen die Frist (E15/B14)"
     section_order "$vm" 'private func run(text: String) async' 'private func rescueEmptyTurn' \
         'defer {' 'cancelResumeWatchdog\(\)' \
         "B36 das Turn-Ende bricht den Watchdog ab"
@@ -634,17 +680,95 @@ background_section() {
         'offersHistoryReload = false' \
         "B40 die Rückkehr nimmt den Wiederholweg nicht wieder zurück (A2)"
     # B41 hält die Semantik aus B14 fest: der Watchdog greift nur, wenn seit der
-    # Rückkehr kein einziges Ereignis ankam — ein lebender Strom wird nicht
+    # Rückkehr kein einziges Lebenszeichen ankam — ein lebender Strom wird nicht
     # abgebrochen, nur weil die Frist abläuft.
     block_has "$vm" 'private func abandonDeadStreamIfNeeded(' \
         'guard isStreaming else \{ return \}' \
         "B41 ohne laufenden Turn tut der Watchdog nichts"
     # B42: eine wartende Freigabe ist legitime Stille (bis `approvalTimeout`).
     # Sie darf nicht als toter Strom gelten — sonst verschwänden die Chips und
-    # der Befehl ließe sich nicht mehr freigeben. Die Frist wird neu gestellt.
-    section_order "$vm" 'private func abandonDeadStreamIfNeeded(' 'private func beginBackgroundTaskIfNeeded' \
-        'turnPhase == \.awaitingApproval' 'scheduleResumeWatchdog\(\)' \
-        "B42 eine wartende Freigabe stellt die Frist neu, statt abzubrechen"
+    # der Befehl ließe sich nicht mehr freigeben. Statt die Frist „neu zu
+    # stellen“ (die Schleife wartet ohnehin weiter), läuft die Runde weiter.
+    section_order "$vm" 'private func scheduleResumeWatchdog' 'private func cancelResumeWatchdog' \
+        'turnPhase == \.awaitingApproval' 'abandonDeadStreamIfNeeded\(\)' \
+        "B42 eine wartende Freigabe lässt die Frist weiterlaufen, statt abzubrechen"
+
+    # --- E1 (Befund 1): ehrlicher Ausgang statt Erfolgs-Hinweis --------------
+    # Ein stiller und ein toter Strom sind nicht unterscheidbar. Die Frist darf
+    # deshalb beenden — aber sie darf keinen Erfolg behaupten.
+    need_fixed "$vm" 'static let backgroundStreamLostNotice = ' \
+        "B43a es gibt einen eigenen Wortlaut für den abgerissenen Turn (E1)"
+    local lost_len
+    lost_len="$(sed -n 's/^[[:space:]]*static let backgroundStreamLostNotice = "\(.*\)"$/\1/p' "$vm" | wc -m | tr -d ' ')"
+    if [[ -n "$lost_len" && "$lost_len" -ge 20 && "$lost_len" -le 301 ]]; then
+        pass "B43b der Verlust-Text bleibt im Rahmen (≤ 300 Zeichen: $((lost_len - 1)))"
+    else
+        bad "B43b Verlust-Text: ${lost_len:-0} Zeichen (inkl. Zeilenende), erwartet 20–300  [$vm]"
+    fi
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'backgroundStreamLostNotice' \
+        "B43c der Abbruch-Pfad setzt den ehrlichen Text (E1)"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'offerHistoryReload\(\)' \
+        "B43d der Abbruch-Pfad bietet den Wiederholweg an (E1/A2)"
+    block_lacks "$vm" 'private func abandonDeadStreamIfNeeded(' 'backgroundResumeNotice' \
+        "B43e der Abbruch-Pfad behauptet keinen Erfolg (E1)"
+    block_lacks "$vm" 'private func abandonDeadStreamIfNeeded(' 'noticeIsInformational = true' \
+        "B43f der Verlust-Text behält die Warn-Optik (E1)"
+    section_has "$vm" 'func reconcileAfterBackground' 'private func beginBackgroundTaskIfNeeded' \
+        'announcesResume' \
+        "B43g der Erfolgs-Hinweis ist im Abbruch-Pfad abschaltbar (E1)"
+
+    # --- E2 (Befund 2): der Watchdog ist kontinuierlich ----------------------
+    # Vorher galt „seit der Rückkehr kein Ereignis“ genau einmal; ein Strom,
+    # der nach einem letzten Ereignis starb, blieb bis 900 s „lebendig“.
+    block_has "$vm" 'private func scheduleResumeWatchdog()' 'while !Task\.isCancelled' \
+        "B44a der Watchdog ist eine Task mit Schleife (E2)"
+    block_has "$vm" 'private func scheduleResumeWatchdog()' 'Task\.sleep' \
+        "B44b je Runde wird die Schonfrist abgewartet"
+    block_has "$vm" 'private func scheduleResumeWatchdog()' 'continue' \
+        "B44c neue Lebenszeichen lassen die nächste Runde beginnen"
+    exactly "$vm" 'resumeWatchdogTask = Task' 1 \
+        "B44d genau eine Stelle erzeugt den Watchdog-Task (kein Task je Ereignis)"
+    block_lacks "$vm" 'private func streamTurn' 'Task \{' \
+        "B44e im Ereignis-Pfad entsteht kein Task (E2)"
+    need_fixed "$prov" 'liveness?.recordLine()' \
+        "B44f jede gelesene Zeile zählt — auch Keepalive und verworfene Zeile (E2)"
+    section_has "$prov" 'for try await line in bytes.lines' 'guard let event = decoder.consume' \
+        'liveness\?\.recordLine\(\)' \
+        "B44g die Zeile zählt vor dem Verwerfen (E2)"
+    need_fixed "$vm" 'private let liveness = ChatStreamLiveness()' \
+        "B44h die Zähler-Referenz gehört dem Modell (E2)"
+    need_fixed "$vm" 'liveness.reset()' \
+        "B44i der Zeilenzähler startet je Turn bei null (E2)"
+
+    # --- E3 (Befund 3): begrenztes Warten und hartes Schließen ---------------
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'isStreaming = false' \
+        "B45a der Turn-Zustand wird nach dem Abbruch hart geschlossen (E3)"
+    block_has "$vm" 'private func abandonDeadStreamIfNeeded(' 'turnStartedAt = nil' \
+        "B45b die Arbeits-Animation endet mit dem Turn (E3)"
+    section_order "$vm" 'private func abandonDeadStreamIfNeeded(' 'private func waitForTurnStop' \
+        'isStreaming = false' 'reconcileAfterBackground\(' \
+        "B45c das Schließen steht vor dem Nachladen (E3)"
+    block_has "$vm" 'private func run(text: String) async' 'didAbandonTurn' \
+        "B45d ein hart geschlossener Turn meldet und merged nicht mehr (E3)"
+
+    # --- E4 (Befund 4): Info-Optik überall ----------------------------------
+    section_has "$view" 'private var emptyState' 'private func scrollToBottom' \
+        '!viewModel\.noticeIsInformational' \
+        "B46a die ChatView wertet die Info-Optik im Leerzustand aus (E4)"
+    section_has "$view" 'private var emptyState' 'private func scrollToBottom' \
+        'if !viewModel\.noticeIsInformational \{' \
+        "B46b ein reiner Hinweis bekommt keinen zweiten Weg (E4)"
+    need_fixed "$slv" 'let errorIsInformational: Bool' \
+        "B46c die Verlaufsliste kennt den Unterschied (E4)"
+    section_has "$slv" 'private var emptyState' '// MARK: Darstellung' \
+        'errorIsInformational' \
+        "B46d die Verlaufsliste zeigt einen Hinweis nicht als Verbindungsfehler (E4)"
+    need_fixed "$view" 'errorIsInformational: viewModel.noticeIsInformational' \
+        "B46e die View reicht die Unterscheidung durch, statt den Text zu prüfen (E4)"
+
+    # --- E6 (Befund 7): der Wiederholweg überlebt ein gescheitertes Laden ----
+    block_has "$vm" 'func reloadHistory() async' 'offerHistoryReload\(\)' \
+        "B47 scheitert auch das erneute Laden, bleibt der Wiederholweg (E6)"
 }
 
 # ---------------------------------------------------------------------------

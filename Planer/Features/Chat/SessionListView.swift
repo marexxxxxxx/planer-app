@@ -28,6 +28,10 @@ struct SessionListView: View {
     let selectedSessionID: String?
     /// Fehlertext des letzten Ladens; `nil` heißt: kein Fehler.
     let errorText: String?
+    /// `true` = `errorText` ist ein Hinweis und kein Verbindungsfehler
+    /// (Rev 9, MARAAA-188). Grenze: die View entscheidet die Optik, nicht den
+    /// Text — sie vergleicht keine Meldungswörter.
+    let errorIsInformational: Bool
 
     let onSelect: (SessionSummary) -> Void
     let onNewChat: () -> Void
@@ -165,7 +169,16 @@ struct SessionListView: View {
 
     private var emptyState: some View {
         VStack(spacing: DesignTokens.Spacing.s) {
-            if let errorText {
+            if let errorText, errorIsInformational {
+                // E4 (Rev 9, MARAAA-188): ein reiner Hinweis ist kein
+                // Verbindungsfehler — kein Wifi-Symbol, kein „Erneut laden“,
+                // kein zweiter Weg neben der Meldungsleiste des Chats.
+                Text(errorText)
+                    .font(DesignTokens.Typography.callout)
+                    .foregroundStyle(DesignTokens.Palette.secondaryLabel)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let errorText {
                 Image(systemName: "wifi.slash")
                     .font(.largeTitle)
                     .foregroundStyle(DesignTokens.Palette.secondaryLabel)
@@ -262,6 +275,7 @@ struct SessionListView: View {
         isStreaming: false,
         selectedSessionID: nil,
         errorText: nil,
+        errorIsInformational: false,
         onSelect: { _ in },
         onNewChat: {},
         onLoadMore: {},

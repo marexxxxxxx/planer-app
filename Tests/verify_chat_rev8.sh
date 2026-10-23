@@ -301,16 +301,30 @@ rescue_section() {
         'return true' 'offerHistoryReload()' \
         "R8c Aufruf nur nach dem Erfolgs-Return"
 
-    # R9 (Erratum §4.4): genau eine Zuweisung im Setter, genau zwei Aufrufe.
+    # R9 (Erratum §4.4): genau eine Zuweisung im Setter.
+    # Nachtrag Runde 2 (MARAAA-188): statt zwei eigenstaendigen Aufrufen sind es
+    # drei. Der dritte steht im Abbruch-Pfad `abandonDeadStreamIfNeeded` (E1):
+    # nach einem abgerissenen Turn muss „Verlauf neu laden“ sichtbar bleiben.
+    # `reloadHistory()` bietet den Weg zusaetzlich inline nach einem erneuten
+    # Fehlschlag an (E6, R9f). Die Zusage („jeder Aufruf ist ein benannter
+    # Weg“) bleibt und wird unten einzeln gehalten: R9d = O3-Zweig,
+    # R9e = Rettung, R9f = reloadHistory.
     exactly "$vm" 'offersHistoryReload = true' 1 "R9a genau 1 Zuweisung"
     section_exactly "$vm" 'private func offerHistoryReload()' 'func reloadHistory()' \
         'offersHistoryReload = true' 1 "R9b die Zuweisung steht im Setter"
-    exactly "$vm" '^[[:space:]]+offerHistoryReload\(\)$' 2 "R9c genau 2 Aufrufe"
+    exactly "$vm" '^[[:space:]]+offerHistoryReload\(\)$' 3 "R9c genau 3 eigenstaendige Aufrufe"
     section_exactly "$vm" 'private func handle(' 'private func rollbackUserEntry(' \
         '^[[:space:]]+offerHistoryReload\(\)$' 1 "R9d einer ist der O3-Zweig"
     section_exactly "$vm" \
         'private func rescueEmptyTurn() async -> Bool' 'private func prepareSession' \
         '^[[:space:]]+offerHistoryReload\(\)$' 1 "R9e einer ist die Rettung"
+    # E6 (Rev 9, MARAAA-188): der vierte Aufruf steht inline in
+    # `reloadHistory()` — er hält den Wiederholweg nach einem erneuten
+    # Fehlschlag offen (scheitert das Nachladen, bleibt `historyLoaded` false).
+    section_has "$vm" \
+        'func reloadHistory()' 'func loadSessions()' \
+        'if !historyLoaded, currentSession != nil \{ offerHistoryReload\(\) \}' \
+        "R9f reloadHistory bietet den Weg nach erneutem Fehlschlag an"
 
     # R10: kein Rollback des optimistischen Eintrags.
     section_exactly "$vm" \
@@ -617,10 +631,24 @@ global_section() {
     # Provider und SSE bewusst (ein zu grosses SSE-Ereignis wird verworfen
     # statt zum Turn-Fehler); ein Vergleich gegen HEAD wuerde die alte Zusage
     # mit der neuen Arbeit umdrehen, statt sie zu pruefen.
-    if [[ -z "$(git diff --stat "$ch4_range" -- "$prov" "$sse" "$dtos" 2>/dev/null || true)" ]]; then
-        pass "X5 ChatStreamProvider/ChatSSE/ChatDTOs unveraendert"
+    # Nachtrag Runde 2 (Befund 5): der Anker wird **vor** dem Vergleich
+    # validiert. Fehlt er, ist X5 rot — ein `git diff` mit unaufloesbarem
+    # Bereich liefert leer und waere sonst vakuum-gruen.
+    if [[ "$ch4_anchor" -eq 0 ]]; then
+        bad "X5a CH4-Anker $ch4_commit nicht auffindbar — Unveraendertheit nicht pruefbar"
+    elif [[ -z "$(git diff --stat "$ch4_range" -- "$prov" "$sse" "$dtos" 2>/dev/null || true)" ]]; then
+        pass "X5a ChatStreamProvider/ChatSSE/ChatDTOs im CH4-Commit unveraendert"
     else
-        bad "X5 unerlaubte Aenderung an Provider/SSE/DTOs: $(git diff --name-only "$ch4_range" -- "$prov" "$sse" "$dtos" | tr '\n' ' ')"
+        bad "X5a unerlaubte Aenderung an Provider/SSE/DTOs: $(git diff --name-only "$ch4_range" -- "$prov" "$sse" "$dtos" | tr '\n' ' ')"
+    fi
+
+    # X5b (Runde 2): die DTO-Vertraege zusaetzlich gegen HEAD. Der feste
+    # CH4-Bereich allein sagt nichts ueber die Arbeit **nach** CH4; der
+    # Wire-Vertrag (`ChatDTOs`) darf auch dort nicht wandern.
+    if [[ -z "$(git diff --stat "${base_commit}..HEAD" -- "$dtos" 2>/dev/null || true)" ]]; then
+        pass "X5b ChatDTOs unveraendert gegen HEAD"
+    else
+        bad "X5b ChatDTOs gegen HEAD geaendert: $(git diff --name-only "${base_commit}..HEAD" -- "$dtos" | tr '\n' ' ')"
     fi
 
     # X6: Design-Tokens unveraendert.
@@ -630,9 +658,9 @@ global_section() {
         bad "X6 Design-Tokens geaendert"
     fi
 
-    # X7: die vier Bestandsfunktionen behalten ihren Rumpf.
+    # X7: die drei Bestandsfunktionen behalten ihren Rumpf.
     local fn
-    for fn in 'func cancel()' 'func reloadHistory()' 'func openSession(' 'func loadOlderMessages()'; do
+    for fn in 'func cancel()' 'func openSession(' 'func loadOlderMessages()'; do
         if diff -q \
             <(brace_block "$tmp_base" "$fn") \
             <(brace_block "$vm" "$fn") >/dev/null 2>&1; then
@@ -641,6 +669,28 @@ global_section() {
             bad "X7 Rumpf geaendert: $fn"
         fi
     done
+
+    # X7b (Runde 2, MARAAA-188/E6): `reloadHistory()` ist die eine bewusst
+    # geaenderte Bestandsfunktion — bei erneutem Fehlschlag setzt sie wieder
+    # `offersHistoryReload`. Geprueft wird dieselbe Zusage wie in X7 („kein
+    # versehentlicher Umbau“) in der Form, die die Aenderung zulaesst: keine
+    # Zeile des Bestandsrumpfs entfernt oder geaendert, und genau **eine**
+    # neue Codezeile, die das Angebot setzt (Kommentarzeilen zaehlen nicht).
+    local rh_removed rh_added rh_added_count
+    rh_removed="$(diff \
+        <(brace_block "$tmp_base" 'func reloadHistory()') \
+        <(brace_block "$vm" 'func reloadHistory()') | grep -c '^<' || true)"
+    rh_added="$(diff \
+        <(brace_block "$tmp_base" 'func reloadHistory()') \
+        <(brace_block "$vm" 'func reloadHistory()') \
+        | grep '^>' | sed 's/^> //' | grep -vE '^[[:space:]]*(//.*)?$' || true)"
+    rh_added_count="$(grep -c . <<<"$rh_added" || true)"
+    if [[ "${rh_removed:-0}" -eq 0 && "${rh_added_count:-0}" -eq 1 ]] \
+        && grep -qF 'offerHistoryReload()' <<<"$rh_added"; then
+        pass "X7b reloadHistory(): Bestandsrumpf unangetastet, nur das E6-Angebot ergaenzt"
+    else
+        bad "X7b reloadHistory() weicht ab: entfernt=${rh_removed:-?}, neue Codezeilen=${rh_added_count:-?}, erwartet 0/1  [$(head -3 <<<"$rh_added")]"
+    fi
 
     # X8: keine neuen Bedienelemente/Zustaende/Timer in der View.
     local sym a b

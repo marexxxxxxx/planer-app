@@ -47,16 +47,32 @@ struct HermesChatConfiguration: Sendable, Equatable {
     /// damit eine legitime Freigabe nicht abgeschnitten wird.
     var streamIdleTimeout: TimeInterval = 900
     /// Schonfrist nach der Rückkehr aus dem Hintergrund (Rev 9, MARAAA-188):
-    /// so lange darf ein Strom ohne ein einziges Ereignis weiterlaufen, bevor
-    /// er als tot gilt und der Serverstand nachgeladen wird.
+    /// so lange darf ein Strom ohne ein einziges Lebenszeichen still sein,
+    /// bevor er als tot gilt und der Serverstand nachgeladen wird.
     ///
     /// Zweck: ein von der Suspension getöteter Strom liefert **nie** einen
     /// Fehler — sein Request lebt bis `streamIdleTimeout` (900 s) weiter. Ohne
     /// Frist bliebe `isStreaming` true und der Composer gesperrt, bis der
     /// Prozess neu startet. Grenze: die Frist ist keine Turn-Grenze; ein
-    /// Strom, der seit der Rückkehr ein Ereignis geliefert hat, bleibt
-    /// unangetastet (E15).
-    var backgroundResumeGracePeriod: TimeInterval = 5
+    /// Strom, der seit der Rückkehr ein Lebenszeichen geliefert hat, bleibt
+    /// unangetastet (E15). Die 12 s liegen bewusst über der kürzesten
+    /// plausiblen Server-Pause: beim Aufwachen fluten die während der
+    /// Suspension gepufferten Bytes sofort in den Leser — erst **danach** ist
+    /// Stille ein Signal und nicht bloß die Lücke zwischen zwei Paketen.
+    var backgroundResumeGracePeriod: TimeInterval = 12
+    /// Obergrenze des Wartens auf das Ende eines technisch abgebrochenen
+    /// Stroms (Rev 9, MARAAA-188).
+    ///
+    /// Zweck: der Turn-Zustand wird danach hart geschlossen, damit ein
+    /// hängender Task den Composer nicht sperrt. Grenze: keine Erfolgsprüfung
+    /// — nach dieser Zeit ist der Task abgebrochen und liefert nichts mehr,
+    /// was die Oberfläche zeigen dürfte.
+    var streamStopWaitLimit: TimeInterval = 3
+    /// Schrittweite der Prüfung „ist der Strom schon zu Ende?“ innerhalb von
+    /// `streamStopWaitLimit`. Klein genug, dass ein normaler Abbruch sofort
+    /// erkannt wird, groß genug, dass die Schleife den Main-Actor nicht
+    /// blockiert.
+    var streamStopPollInterval: TimeInterval = 0.2
     /// Server-Deckel für die Verlaufsliste ist 200.
     var sessionPageSize = 50
     /// Server-Deckel für Nachrichten ist 500.

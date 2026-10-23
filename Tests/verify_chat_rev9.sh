@@ -2,10 +2,19 @@
 #
 # Statische Abnahme der Rev-9-Leistungen des Chat-Tabs (MARAAA-188):
 #
-#   S1–S15  Ein SSE-Ereignis über dem Größenlimit bricht den Turn nicht ab;
-#           das Limit ist genau ein benannter Wert (Auftrag A3/A4).
+#   S1–S17  Ein SSE-Ereignis über dem Größenlimit bricht den Turn nicht ab;
+#           das Limit ist genau ein benannter Wert (Auftrag A3/A4). S16/S17
+#           sichern den `id:`-Vertrag: ein leerer Wert setzt die letzte ID
+#           zurück (Nachtrag Runde 2, Befund 7).
 #   N1–N10  Der Hintergrund-Hinweis ist ein Hinweis, kein Fehler — die
 #           Unterscheidung ist expliziter Zustand, kein Textvergleich (A5).
+#
+# Mutationsprobe (Nachtrag Runde 2): Jede hier neue Prüfung ist gegen den
+# Ist-Stand `main` rot belegt — dort fehlen `maxStreamEventCharacters` und der
+# Decoder-Verwurf (S1–S17), und `noticeIsInformational` existiert nicht (N1–N10).
+# Beleg: `git worktree add /tmp/probe main`, dieses Skript dorthin kopieren,
+# `bash Tests/verify_chat_rev9.sh all` → Exit 1 mit den S-/N-Zeilen als FAIL.
+# Der Lauf steht im Bericht zu MARAAA-188 (Runde 2) und in der Commit-Nachricht.
 #
 # Rein statisch: grep/awk/Dateiprüfungen, keine Swift-Toolchain, kein Netz,
 # kein Aufruf anderer Tests.
@@ -214,6 +223,15 @@ sse_section() {
         "S14 die Leer-Prüfung bleibt bestehen"
     need_fixed "$prov" 'throw ChatStreamError.emptyResponse' \
         "S15 ohne Inhalt bleibt es bei emptyResponse (kein stiller Erfolg)"
+
+    # E6b (Nachtrag Runde 2): `id:` mit leerem Wert ist eine Zuweisung, kein
+    # „nichts“ — der SSE-Vertrag setzt die zuletzt gesehene ID dann auf "".
+    # Der Abschnitt ist die `id`-Verzweigung bis zum `default:` desselben
+    # `switch`; ein Riegel gegen den leeren Wert wäre dort sichtbar.
+    section_has "$sse" 'case "id":' 'default:' 'lastIdentifier = value' \
+        "S16 ein id-Feld übernimmt seinen Wert auch leer (SSE-Vertrag)"
+    section_lacks "$sse" 'case "id":' 'default:' 'isEmpty|!value|guard' \
+        "S17 kein Riegel gegen den leeren id-Wert (SSE-Vertrag)"
 }
 
 # ---------------------------------------------------------------------------

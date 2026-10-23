@@ -99,6 +99,7 @@ struct ChatView: View {
                     isStreaming: viewModel.isStreaming,
                     selectedSessionID: viewModel.currentSession?.id,
                     errorText: viewModel.sessions.isEmpty ? viewModel.notice : nil,
+                    errorIsInformational: viewModel.noticeIsInformational,
                     onSelect: { session in
                         showsSessions = false
                         Task { await viewModel.openSession(session) }
@@ -460,8 +461,12 @@ struct ChatView: View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.s) {
             if viewModel.isLoadingHistory {
                 ProgressView("Lade Verlauf …")
-            } else if let session = viewModel.currentSession, let notice = viewModel.notice {
+            } else if let session = viewModel.currentSession,
+                      let notice = viewModel.notice,
+                      !viewModel.noticeIsInformational {
                 // Fehler + leerer Verlauf: Fehlerzustand statt Leerzustand.
+                // E4 (Rev 9, MARAAA-188): nur ein **echter** Fehler bekommt
+                // Wifi-Symbol, Text und „Erneut laden“.
                 Image(systemName: "wifi.slash")
                     .font(.largeTitle)
                     .foregroundStyle(DesignTokens.Palette.secondaryLabel)
@@ -477,6 +482,8 @@ struct ChatView: View {
                 .buttonStyle(.bordered)
                 .accessibilityLabel("Verlauf erneut laden")
             } else if let session = viewModel.currentSession {
+                // E4: Ein reiner Hinweis steht schon in der `noticeBar`; hier
+                // gibt es weder ein zweites Wifi-Symbol noch einen zweiten Weg.
                 Image(systemName: "text.bubble")
                     .font(.largeTitle)
                     .foregroundStyle(DesignTokens.Palette.secondaryLabel)
@@ -486,11 +493,13 @@ struct ChatView: View {
                     .foregroundStyle(DesignTokens.Palette.secondaryLabel)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Button("Erneut laden") {
-                    Task { await viewModel.openSession(session) }
+                if !viewModel.noticeIsInformational {
+                    Button("Erneut laden") {
+                        Task { await viewModel.openSession(session) }
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Verlauf erneut laden")
                 }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("Verlauf erneut laden")
             } else {
                 Image(systemName: "bubble.left.and.bubble.right")
                     .font(.largeTitle)
