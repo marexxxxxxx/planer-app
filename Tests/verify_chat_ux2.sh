@@ -750,6 +750,8 @@ background_section() {
         "B45c das Schließen steht vor dem Nachladen (E3)"
     block_has "$vm" 'private func run(text: String) async' 'didAbandonTurn' \
         "B45d ein hart geschlossener Turn meldet und merged nicht mehr (E3)"
+    block_has "$vm" 'private func merge(sessionID: String)' 'guard !didAbandonTurn' \
+        "B45e auch ein spätes Merge-Ergebnis wird verworfen (E3)"
 
     # --- E4 (Befund 4): Info-Optik überall ----------------------------------
     section_has "$view" 'private var emptyState' 'private func scrollToBottom' \

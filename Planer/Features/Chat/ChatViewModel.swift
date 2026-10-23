@@ -1370,6 +1370,11 @@ final class ChatViewModel: ObservableObject {
 
     @discardableResult
     private func merge(sessionID: String) async -> MergeOutcome {
+        // E3 (Rev 9, MARAAA-188): Ein vom Watchdog verworfener Turn merged
+        // nicht mehr. Sein Serverstand ist bereits über
+        // `reconcileAfterBackground` geladen; ein spätes Ergebnis — oder eine
+        // späte Fehlermeldung aus `catch` — würde ihn überschreiben.
+        guard !didAbandonTurn else { return .skipped }
         // E5/M4: Ein Merge mit `watermark == nil` ist nur für eine in genau
         // diesem Turn angelegte Session zulässig. Der Fall „openSession
         // fehlgeschlagen, dann gesendet“ ist durch `canSend` gesperrt; dieser
