@@ -38,8 +38,9 @@ planer-app/
 ├── Planer/
 │   ├── App/
 │   │   ├── PlanerApp.swift            @main, ModelContainer + App-Lock-Gate
-│   │   ├── AppRootView.swift          TabView, 5 Tabs
+│   │   ├── AppRootView.swift          TabView der sichtbaren Tabs
 │   │   ├── TabRegistry.swift          AppTab + TabDefinition + Registry
+│   │   ├── TabVisibilityPreferences.swift   ausgeblendete Tabs (UserDefaults)
 │   │   ├── SettingsTabDefinition.swift   Tab 5 → SettingsView
 │   │   └── Assets.xcassets/           AccentColor, AppIcon
 │   ├── DesignSystem/
@@ -53,7 +54,7 @@ planer-app/
 │   ├── Networking/  NetworkClient, HermesSession, RetryPolicy, APIError, ServiceConfiguration, ServiceType
 │   ├── Keychain/    KeychainManager
 │   ├── Cache/       ModelContainer, Syncable, Entities
-│   └── Settings/    SettingsView, AppLockSection, ServiceSettingsSection
+│   └── Settings/    SettingsView, ServiceSettingsSection, ChatSettingsSection, AppearanceSettingsSection, TabBarSettingsSection, AppLockSection
 ```
 
 `Tests/Fixtures/` enthält Beispielantworten und JSON-Schemata für Tasks,
@@ -61,10 +62,10 @@ Grocy und Mealie.
 
 ## Tab-Anbindung
 
-`AppRootView` deklariert fünf Tabs mit Titel und SF-Symbol. Die **Inhalte**
-kommen ausschließlich aus `TabRegistry.rootView(for:)`; jeder Case verweist auf
-die `TabDefinition` seines Feature-Ordners. Ein Feature-WP ersetzt nur seine
-eigene `…TabDefinition` und seine View — `AppRootView` und `TabRegistry` bleiben
+`AppRootView` rendert bis zu fünf Tabs; Titel und SF-Symbol stehen an `AppTab`.
+Die **Inhalte** kommen ausschließlich aus `TabRegistry.rootView(for:)`; jeder
+Case verweist auf die `TabDefinition` seines Feature-Ordners. Ein Feature-WP
+ersetzt nur seine eigene `…TabDefinition` und seine View — `TabRegistry` bleibt
 unberührt.
 
 | Tab | Label | SF Symbol | Provider | WP |
@@ -79,6 +80,16 @@ unberührt.
 `SettingsView` aus `Planer/Settings/`. `PlanerApp.swift` injiziert den
 `ModelContainer` aus `Planer/Cache/ModelContainer.swift` und legt das
 App-Lock-Gate (Sperr-Oberfläche + `LocalAuthentication`) vor die Tabs.
+
+### Tab-Bar aufräumen
+
+In **Einstellungen → Tab-Bar** lassen sich To-Dos, Einkauf und Rezepte
+ausblenden und jederzeit wieder einblenden. Die Auswahl liegt als
+`hiddenAppTabs` in `UserDefaults` (`TabVisibilityPreferences`) und überlebt den
+Neustart. Beide Tab-Bar-Zweige rendern dieselbe Liste `visibleTabs`, damit ein
+ausgeblendeter Tab nicht in einem Zweig stehen bleibt. Chat und Einstellungen
+sind nicht abwählbar; wird der gerade ausgewählte Tab ausgeblendet, springt die
+Auswahl auf Chat zurück.
 
 ## Design-Tokens
 
@@ -179,10 +190,10 @@ den Password-Login.
 Ohne Swift-Toolchain prüfbar:
 
 ```sh
-grep -c 'Tab(' Planer/App/AppRootView.swift          # erwartet: 5
 for s in bubble.left.and.bubble.right checklist cart fork.knife gearshape; do
-  grep -q "$s" Planer/App/AppRootView.swift && echo "OK  $s" || echo "FEHLT $s"
+  grep -q "$s" Planer/App/TabRegistry.swift && echo "OK  $s" || echo "FEHLT $s"
 done
+bash Tests/verify_tab_visibility.sh
 
 for t in Tests/verify_*.sh; do bash "$t"; done
 ```

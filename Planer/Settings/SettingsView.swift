@@ -2,7 +2,7 @@
 //  SettingsView.swift
 //  Planer
 //
-//  Tab 5 „Einstellungen“: vier Dienst-Sektionen, Chat, Darstellung,
+//  Tab 5 „Einstellungen“: vier Dienst-Sektionen, Chat, Darstellung, Tab-Bar,
 //  „Allgemein & Sicherheit“ und Sprache.
 //
 
@@ -17,7 +17,7 @@ import SwiftUI
 /// von Einstellungen zwischen Geräten.
 ///
 /// Reihenfolge ist bindend (spec-chat Rev 6 §4.9): die vier Dienst-Sektionen
-/// zuerst, danach Chat, Darstellung, Sperre, Sprache.
+/// zuerst, danach Chat, Darstellung, Tab-Bar, Sperre, Sprache.
 struct SettingsView: View {
     var body: some View {
         NavigationStack {
@@ -28,6 +28,7 @@ struct SettingsView: View {
                 ServiceSettingsSection(service: .mealie)
                 ChatSettingsSection()
                 AppearanceSettingsSection()
+                TabBarSettingsSection()
                 AppLockSection()
                 VoiceSettingsSection()
             }
