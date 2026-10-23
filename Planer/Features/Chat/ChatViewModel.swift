@@ -1379,7 +1379,15 @@ final class ChatViewModel: ObservableObject {
             guard generation == turnGeneration, abandonedGeneration != generation else {
                 return
             }
-            switch await merge(sessionID: effectiveSessionID) {
+            let outcome = await merge(sessionID: effectiveSessionID)
+            // R-CH12: `merge` gibt den Main-Actor ab. Beginnt in dieser Zeit
+            // ein neuer Turn, gehört das Ergebnis — auch die Fehlermeldung —
+            // weiterhin dem alten. Nach dem `await` gilt der Riegel erneut,
+            // bevor irgendein Zweig `notice` schreibt.
+            guard generation == turnGeneration, abandonedGeneration != generation else {
+                return
+            }
+            switch outcome {
             case .nothingNew:
                 // F12: eine bereits gesetzte Fehlermeldung hat Vorrang.
                 if notice == nil {
@@ -1616,9 +1624,22 @@ final class ChatViewModel: ObservableObject {
             let agentEntries = entries[rebuiltStart...].filter { $0.kind == .agent }.count
 
             await loadSessions()
+            // R-CH12: `loadSessions()` gibt den Main-Actor ab und kann im
+            // Fehlerfall selbst eine `notice` setzen. Nach der Rückkehr gilt
+            // derselbe Riegel wie am Eintritt: ein fremder Turn erbt weder
+            // die Liste noch das Merge-Ergebnis.
+            guard generation == turnGeneration, abandonedGeneration != generation else {
+                return .skipped
+            }
             syncCurrentSessionWithList()
             return .merged(agentEntries: agentEntries)
         } catch {
+            // R-CH12: auch der Fehlerpfad gehört zum Turn, der ihn begonnen
+            // hat. Ein verspäteter Transportfehler eines bereits verworfenen
+            // Turns darf im neuen keine `.failed`-Meldung auslösen.
+            guard generation == turnGeneration, abandonedGeneration != generation else {
+                return .skipped
+            }
             return .failed
         }
     }

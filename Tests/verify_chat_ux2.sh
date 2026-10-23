@@ -86,6 +86,14 @@
 # binden weiterhin die Verwendungsstelle. Rot-Beleg: `= 12` in
 # `ChatConfiguration.swift` ⇒ B31 rot.
 #
+# Nachtrag R-CH12 (MARAAA-198, minor-Befund 1 aus G-CH12/MARAAA-194): B50a–B50e
+# binden die beiden Ausstiegspfade von `merge`, die nicht über den
+# Post-`await`-Guard liefen (`await loadSessions()`, `catch` → `.failed`), und
+# den `notice`-Schreibpfad des Aufrufers nach dem Merge. Geprüft wird die
+# Reihenfolge im Rumpf, nicht ein Vorkommen in der Datei. Rot-Belege im Bericht
+# zu MARAAA-198: Guard nach `loadSessions()` entfernt ⇒ B50a, Guard im `catch`
+# entfernt ⇒ B50b/B50c, Guard in `streamTurn` entfernt ⇒ B50e.
+#
 # Abweichung von §7.3, begründet: X1 verlangt „`300` genau 1 Treffer in $cfg“.
 # Am Ist-Code steht `300` zweimal in `ChatConfiguration.swift` — Zeile 59
 # (`approvalTimeout`) und Zeile 68 (`maxNoticeCharacters`, unverändert aus
@@ -209,6 +217,24 @@ section_order() {
 # das der Unterschied zwischen „synchron im Handler“ und „im Hop daneben“.
 # Voraussetzung: die geprüften Rümpfe führen keine Klammern in Zeichenketten
 # (Kommentare dürfen das Wort `Task` enthalten, aber kein `{` danach).
+# Reihenfolge **mehrerer** wörtlicher Marken innerhalb eines Abschnitts: grün
+# nur, wenn sie in genau dieser Reihenfolge vorkommen. Anders als
+# `section_order` wird die nächste Marke erst **nach** der vorigen gesucht —
+# eine frühere Fundstelle (etwa ein Guard am Funktions-Eintritt) kann die
+# Prüfung damit nicht ausgleichen. Marken werden mit `::` getrennt.
+section_sequence() {
+    local file="$1" start="$2" end="$3" label="$4" marks="$5" body
+    body="$(section "$file" "$start" "$end")"
+    if awk -v marks="$marks" '
+        BEGIN { n = split(marks, m, "::"); want = 1 }
+        want <= n && index($0, m[want]) > 0 { want++ }
+        END { exit !(want > n) }' <<<"$body"; then
+        pass "$label"
+    else
+        bad "$label  [$file, Abschnitt /$start/../$end/: Reihenfolge »$marks« nicht gefunden]"
+    fi
+}
+
 brace_block() {
     awk -v s="$2" '
         !on && index($0, s) > 0 { on = 1 }
@@ -873,6 +899,30 @@ background_section() {
         'private func waitForTurnStop' \
         'guard generation == turnGeneration' 'notice = approvalExpired' \
         "B49e nach dem Nachladen riegelt die Generation erneut vor dem Schreiben (W4)"
+
+    # --- R-CH12 (MARAAA-198): die beiden Merge-Ausstiegspfade riegeln ---------
+    # Review MARAAA-194, Befund 1 (minor): `merge` hielt die Generation beim
+    # Eintritt fest, prüfte sie aber nur nach dem `await api.messages`. Der
+    # Erfolgspfad schreibt nach `await loadSessions()` (das selbst eine
+    # `notice` setzen kann), der Fehlerpfad im `catch` — beide ohne erneute
+    # Prüfung. Geprüft wird die Reihenfolge der Marken im Rumpf von `merge`.
+    section_sequence "$vm" 'private func merge(sessionID: String)' 'private func applyMergedUser' \
+        "B50a nach dem Nachladen riegelt der Erfolgspfad vor dem Übernehmen (R-CH12)" \
+        'await loadSessions()::guard generation == turnGeneration, abandonedGeneration != generation else::syncCurrentSessionWithList()'
+    section_sequence "$vm" 'private func merge(sessionID: String)' 'private func applyMergedUser' \
+        "B50b der Fehlerpfad prüft die Generation vor .failed (R-CH12)" \
+        '} catch {::guard generation == turnGeneration, abandonedGeneration != generation else::return .failed'
+    section_sequence "$vm" 'private func merge(sessionID: String)' 'private func applyMergedUser' \
+        "B50c ein fremder Turn endet im catch als .skipped (R-CH12)" \
+        '} catch {::return .skipped::return .failed'
+    block_lacks "$vm" 'private func merge(sessionID: String)' 'notice =' \
+        "B50d merge schreibt selbst keine Meldung — der Aufrufer entscheidet (R-CH12)"
+    # Der Aufrufer schrieb die `.failed`-Meldung nach dem `await` ohne Prüfung.
+    # Geprüft wird der Riegel **nach** dem Merge-Aufruf und **vor** dem Zweig,
+    # der die Meldung setzt. Mutation „guard löschen“ ist rot (B50e).
+    section_sequence "$vm" 'private func streamTurn' 'private func adoptSessionID' \
+        "B50e der Merge-Aufrufer riegelt vor dem Schreiben der Meldung (R-CH12)" \
+        'let outcome = await merge(sessionID: effectiveSessionID)::guard generation == turnGeneration, abandonedGeneration != generation::case .failed:'
 
     # --- E4 (Befund 4): Info-Optik überall ----------------------------------
     section_has "$view" 'private var emptyState' 'private func scrollToBottom' \
