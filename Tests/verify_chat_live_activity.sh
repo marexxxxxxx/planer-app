@@ -423,6 +423,63 @@ section_between_has "$vm" "$sync_start" "$sync_end" '} else {' 'polls += 1' \
     'L20e Pause beendet die Runde vor der Anfrage (`continue` im else-Zweig)'
 
 # ---------------------------------------------------------------------------
+# E1-E4, E9: die fuenf in MARAAA-213 benannten Restluecken.
+# ---------------------------------------------------------------------------
+
+# E1: `polls += 1` steht hinter dem Gate. Zieht man es davor, verbrauchen
+# uebersprungene Takte (kein laufendes Werkzeug, keine offene Abschlussrunde)
+# Budget — die erlaubten Anfragen fehlen dann am Ende des Laufs.
+poll_line="$(section_line "$vm" "$sync_start" "$sync_end" 'polls += 1')"
+gate_line="$(section_line "$vm" "$sync_start" "$sync_end" 'let running = hasRunningToolCard')"
+if [[ -n "$poll_line" && -n "$gate_line" && "$poll_line" -gt "$gate_line" ]]; then
+    pass "E1 Budget wird erst nach dem Gate verbraucht (polls: Zeile $poll_line > Gate: $gate_line)"
+else
+    bad "E1 Budget wird vor dem Gate verbraucht (polls: ${poll_line:-fehlt}, Gate: ${gate_line:-fehlt}; erwartet: polls nach dem Gate)"
+fi
+
+# E2: nach einer erfolgreichen Anfrage wird der Fehlerzaehler zurueckgesetzt.
+# Ohne den Reset beenden zwei **nicht aufeinanderfolgende** Fehler den Abgleich.
+section_between_has "$vm" "$sync_start" "$sync_end" \
+    'let page = try await api.messages(' '} catch {' \
+    'consecutiveFailures = 0' \
+    'E2 Erfolg setzt den Fehlerzaehler zurueck (kein Abbruch nach zwei nicht aufeinanderfolgenden Fehlern)'
+
+# E3: angewandt wird die gefilterte Menge, nicht die ganze Seite. Mit
+# `applyHistoryDelta(page.messages)` waere der Cursor wirkungslos und jede
+# Runde uebernaehme erneut alle Zeilen.
+delta_body="$(section "$vm" "$sync_start" "$sync_end")"
+if [[ -z "$delta_body" ]]; then
+    bad "E3 Abgleich wendet die gefilterten Zeilen an  [$vm: Abschnitt /$sync_start/../$sync_end/ nicht gefunden]"
+elif grep -qE 'applyHistoryDelta\(fresh\)' <<<"$delta_body" \
+     && ! grep -qE 'applyHistoryDelta\(page\.messages\)' <<<"$delta_body"; then
+    pass "E3 Abgleich wendet nur die gefilterten Zeilen an (applyHistoryDelta(fresh))"
+else
+    bad "E3 Abgleich wendet die ganze Seite an (erwartet: applyHistoryDelta(fresh), verboten: applyHistoryDelta(page.messages))"
+fi
+
+# E4: hoechstens ein Abgleich-Task je Turn. Ohne den Guard legt jedes
+# `.toolProgress`-Frame einen weiteren Task an und die Last vervielfacht sich.
+start_start='private func startLiveActivitySync('
+start_end='private func liveActivitySync('
+section_has "$vm" "$start_start" "$start_end" \
+    'guard liveActivityTask == nil else \{ return \}' \
+    'E4 hoechstens ein Abgleich-Task je Turn (guard liveActivityTask == nil)'
+
+# E9: der Guard **nach** dem `await` schuetzt den neuen Turn. Fehlt er, kann
+# ein spaetes Ergebnis des alten Laufs in den inzwischen begonnenen Turn
+# schreiben. Die frueheren Guards davor decken diesen Fall nicht ab.
+after_await="$(section_between "$vm" "$sync_start" "$sync_end" \
+    'let page = try await api.messages(' 'let fresh = page.messages')"
+if [[ -z "$after_await" ]]; then
+    bad "E9 Guard nach dem await schuetzt den neuen Turn  [$vm: Rumpf /let page = try await api.messages(/../let fresh = page.messages/ nicht gefunden]"
+elif grep -qE 'generation == turnGeneration' <<<"$after_await" \
+     && grep -qE 'abandonedGeneration != generation' <<<"$after_await"; then
+    pass "E9 Guard nach dem await schuetzt den neuen Turn (generation + abandonedGeneration)"
+else
+    bad "E9 Guard nach dem await fehlt (erwartet: generation == turnGeneration und abandonedGeneration != generation vor dem Anwenden)"
+fi
+
+# ---------------------------------------------------------------------------
 
 echo "HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo unbekannt)"
 
